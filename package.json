@@ -7,7 +7,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "tournament": "tsx src/cli/tournament.ts",
-    "play": "tsx src/cli/play.ts"
+    "play": "tsx src/cli/play.ts",
+    "train": "tsx src/cli/train.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

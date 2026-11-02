@@ -21,7 +21,9 @@ export const DOUGHNUT: GameConfig = {
     noTrickPenalty: 5,
     foldPenalty: { atOrBelow: 5, points: 1 },
   },
-  end: { targetScore: 0, maxHands: null },
+  // maxHands is a safety cap: with many players folding is often free, and
+  // games can otherwise stall indefinitely. Lowest score wins at the cap.
+  end: { targetScore: 0, maxHands: 100 },
 };
 
 /** Variant: lowest score after 20 hands wins. */

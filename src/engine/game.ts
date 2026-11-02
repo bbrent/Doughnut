@@ -84,12 +84,19 @@ export function cloneState(s: GameState): GameState {
   };
 }
 
-export function newGame(config: GameConfig, numPlayers: number, seed: number, firstDealer = 0): GameState {
+export function newGame(
+  config: GameConfig,
+  numPlayers: number,
+  seed: number,
+  firstDealer = 0,
+  /** Start from a given scoreboard instead of startScore (used for training). */
+  initialScores?: number[],
+): GameState {
   validateConfig(config, numPlayers);
   const s: GameState = {
     config,
     numPlayers,
-    scores: Array(numPlayers).fill(config.scoring.startScore),
+    scores: initialScores ? initialScores.slice() : Array(numPlayers).fill(config.scoring.startScore),
     startScores: [],
     handsPlayed: 0,
     dealer: firstDealer,

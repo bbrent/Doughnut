@@ -1,8 +1,11 @@
+import { readFileSync } from 'node:fs';
 import { heuristicAgent, ismctsAgent, randomAgent, type Agent } from '../ai';
+import { dmcAgent, loadModel } from '../ml';
 
-/** Parse a bot spec: random | heuristic | ismcts | ismcts:<iterations> */
+/** Parse a bot spec: random | heuristic | ismcts[:iterations] | dmc[:model.json] */
 export function makeBot(spec: string): Agent {
-  const [kind, arg] = spec.split(':');
+  const [kind, ...rest] = spec.split(':');
+  const arg = rest.join(':') || undefined;
   switch (kind) {
     case 'random':
       return randomAgent();
@@ -10,8 +13,10 @@ export function makeBot(spec: string): Agent {
       return heuristicAgent();
     case 'ismcts':
       return ismctsAgent(arg ? { iterations: Number(arg) } : {});
+    case 'dmc':
+      return dmcAgent(loadModel(JSON.parse(readFileSync(arg ?? 'models/doughnut.json', 'utf8'))), { name: spec });
     default:
-      throw new Error(`Unknown bot "${spec}" (random | heuristic | ismcts[:iterations])`);
+      throw new Error(`Unknown bot "${spec}" (random | heuristic | ismcts[:iterations] | dmc[:model.json])`);
   }
 }
 
