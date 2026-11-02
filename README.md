@@ -75,4 +75,16 @@ A mode is a `GameConfig` object in `modes.ts`. Most variants are a few fields, e
 - **Encoding** (`features.ts`) describes cards by role: suits are reordered so trump is always first, so one model generalises across suits. The mode's settings are also inputs, so related variants can share a model. Changing the layout means bumping `FEATURE_VERSION` and retraining.
 - **Checkpoints:** every evaluation (full games vs heuristic bots) writes `<out>.latest.json`, and `<out>` holds the best so far. `--resume <file>` continues training.
 
+### Results so far
+
+`models/doughnut.json`: 275k training hands (about 20 minutes on 4 cores). 120 four-player games, seats rotating:
+
+| Bot | Win % (fair 25%) | ms / move |
+|---|---|---|
+| dmc | 31.3% | 0.1 |
+| ismcts (1500 iterations) | 47.9% | 25.6 |
+| heuristic | 5.4% / 15.4% | 0.0 |
+
+Against three heuristic bots the model wins ~50%. It plateaued after ~150k hands, so more self-play alone won't close the gap to ISMCTS.
+
 Options: `--hands`, `--workers` (default cores − 1; `1` is single-threaded), `--eval-every`, `--eval-games`, `--lr`, `--replay-ratio`, `--seed`, `--mode`.
