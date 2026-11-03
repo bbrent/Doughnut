@@ -44,10 +44,10 @@ console.log(`${decisions.length} decisions from ${files.length} file(s); net ${n
 
 const t0 = performance.now();
 let best = -1;
-distill(net, decisions, o, (e, trainLoss, valLoss) => {
+distill(net, decisions, o, (e, trainLoss, valLoss, agree) => {
   const ev = evaluate(net, config, 4, evalGames, 12345);
   console.log(
-    `epoch ${e} | train ${trainLoss.toFixed(4)} | val ${valLoss.toFixed(4)} | win vs 3 heuristic ${(100 * ev.winRate).toFixed(1)}% | ${((performance.now() - t0) / 1000).toFixed(0)}s`,
+    `epoch ${e} | train ${trainLoss.toFixed(4)} | val ${valLoss.toFixed(4)} | agrees with search ${(100 * agree).toFixed(1)}% | win vs 3 heuristic ${(100 * ev.winRate).toFixed(1)}% | ${((performance.now() - t0) / 1000).toFixed(0)}s`,
   );
   const meta = { featureVersion: FEATURE_VERSION, mode: config.id, distilledFrom: files, epoch: e, winRate: ev.winRate };
   writeFileSync(out.replace(/\.json$/, '.latest.json'), JSON.stringify(net.toJSON(meta)));

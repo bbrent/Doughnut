@@ -79,17 +79,7 @@ A mode is a `GameConfig` object in `modes.ts`. Most variants are a few fields, e
 - **Encoding** (`features.ts`) describes cards by role: suits are reordered so trump is always first, so one model generalises across suits. The mode's settings are also inputs, so related variants can share a model. Changing the layout means bumping `FEATURE_VERSION` and retraining.
 - **Checkpoints:** every evaluation (full games vs heuristic bots) writes `<out>.latest.json`, and `<out>` holds the best so far. `--resume <file>` continues training.
 
-### Results so far
-
-`models/doughnut.json`: 275k training hands (about 20 minutes on 4 cores). 120 four-player games, seats rotating:
-
-| Bot | Win % (fair 25%) | ms / move |
-|---|---|---|
-| dmc | 31.3% | 0.1 |
-| ismcts (1500 iterations) | 47.9% | 25.6 |
-| heuristic | 5.4% / 15.4% | 0.0 |
-
-Against three heuristic bots the model wins ~50%. It plateaued after ~150k hands, so more self-play alone won't close the gap to ISMCTS.
+Self-play alone plateaued at ~150k hands (about 50% wins vs three heuristic bots), which is why the distillation step below exists.
 
 Options: `--hands`, `--workers` (default cores − 1; `1` is single-threaded), `--eval-every`, `--eval-games`, `--lr`, `--replay-ratio`, `--seed`, `--mode`.
 
@@ -103,3 +93,30 @@ Self-play plateaus because the model can only learn as well as it already plays.
 Options for `gen-data`: `--hands`, `--iterations`, `--workers`, `--explore` (chance of a visit-weighted random move, default 0.1), `--heuristic-seats`, `--out`. For `distill`: `--data a.bin,b.bin`, `--init <model>` (start from an existing model), `--hidden 512,256` (fresh network size), `--epochs`, `--lr`, `--alpha`, `--min-visits`, `--out`.
 
 Data files can be combined, so more data can be generated later and added. They record `FEATURE_VERSION` and are rejected if the encoding changes.
+
+`npx tsx scripts/agreement.ts <test.bin> <model.json>...` compares models against ISMCTS on held-out search data, per decision type: how often they pick the search's top move, and the *regret* (search value given up by not picking it).
+
+## Results
+
+`models/doughnut.json`: 275k self-play hands, then distilled from 15,000 ISMCTS(1000) hands (184k decisions, ~75 min of generation on 4 cores). Seats rotate in all tournaments.
+
+Against ISMCTS (four players with two heuristic bots, 200 games):
+
+| Bot | Win % (fair 25%) | ms / move |
+|---|---|---|
+| ismcts (1500 iterations) | 41.5% | ~50 (under load) |
+| dmc distilled | 35.8% | 0.2 |
+| (before distillation: dmc 31.3% vs ismcts 47.9%) | | |
+
+Distilled vs self-play-only model (1,500 games each): 55.0% vs 45.0% heads-up; +1.9 points with 4 players; +3.5 points with 6 players.
+
+Where the gain came from (regret vs ISMCTS on 1,000 held-out hands; lower is better):
+
+| Decision | Self-play | Distilled |
+|---|---|---|
+| Play or fold | 0.0175 | 0.0108 |
+| Dealer pick up or fold | 0.0320 | 0.0175 |
+| Dealer exchange (10/A) | 0.0193 | 0.0127 |
+| Card play | 0.0211 | 0.0214 |
+
+Bidding improved a lot; card play did not. A larger network (512-256) and training from scratch were no better, so the card-play gap is most likely what the features describe rather than model size.

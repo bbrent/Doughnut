@@ -124,6 +124,31 @@ export function mse(net: Mlp, samples: Sample[]): number {
   return samples.length ? sum / samples.length : NaN;
 }
 
+/** Fraction of decisions where the network's best move is the search's most-visited move. */
+export function agreement(net: Mlp, decisions: Decision[]): number {
+  let hit = 0;
+  for (const d of decisions) {
+    const state = new Float32Array(STATE_SIZE);
+    scatter(d.state, state);
+    const q = net.predictShared(
+      state,
+      d.actions.map((a) => {
+        const x = new Float32Array(INPUT_SIZE - STATE_SIZE);
+        scatter(a.feat, x);
+        return x;
+      }),
+    );
+    let best = 0;
+    let top = 0;
+    d.actions.forEach((a, i) => {
+      if (q[i] > q[best]) best = i;
+      if (a.visits > d.actions[top].visits) top = i;
+    });
+    if (best === top) hit++;
+  }
+  return decisions.length ? hit / decisions.length : NaN;
+}
+
 /**
  * Supervised training on searched decisions. The validation split is by
  * decision (not by sample) so moves from one position never straddle it.
@@ -132,12 +157,13 @@ export function distill(
   net: Mlp,
   decisions: Decision[],
   o: DistillOptions,
-  onEpoch: (epoch: number, trainLoss: number, valLoss: number) => void = () => {},
+  onEpoch: (epoch: number, trainLoss: number, valLoss: number, valAgreement: number) => void = () => {},
 ): void {
   const rng = mulberry32(o.seed);
   const ds = shuffle(decisions.slice(), rng);
   const nVal = Math.floor(ds.length * o.valFrac);
-  const val = buildSamples(ds.slice(0, nVal), o);
+  const valDecisions = ds.slice(0, nVal);
+  const val = buildSamples(valDecisions, o);
   const train = buildSamples(ds.slice(nVal), o);
   const steps = o.epochs * Math.floor(train.length / o.batchSize);
   let step = 0;
@@ -152,7 +178,7 @@ export function distill(
       sum += net.trainBatch(batch.map(densify), batch.map((s) => s.target), lr);
       n++;
     }
-    onEpoch(e, sum / Math.max(1, n), mse(net, val));
+    onEpoch(e, sum / Math.max(1, n), mse(net, val), agreement(net, valDecisions));
   }
 }
 
