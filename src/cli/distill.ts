@@ -2,6 +2,7 @@
  * Train the network on ISMCTS data.
  *
  *   npm run distill -- --data data/a.bin,data/b.bin --init models/doughnut.json --out models/doughnut.json
+ *   npm run distill -- --hidden 512,256          # fresh, larger network
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { MODES, mulberry32 } from '../engine';
@@ -35,9 +36,10 @@ const decisions: Decision[] = [];
 for (const f of files) {
   const meta = JSON.parse(readFileSync(f + '.meta.json', 'utf8'));
   if (meta.featureVersion !== FEATURE_VERSION) throw new Error(`${f}: feature version ${meta.featureVersion} != ${FEATURE_VERSION}; regenerate`);
-  decisions.push(...decodeDecisions(new Uint8Array(readFileSync(f))));
+  for (const d of decodeDecisions(new Uint8Array(readFileSync(f)))) decisions.push(d);
 }
-const net = args.init ? loadModel(JSON.parse(readFileSync(args.init, 'utf8')) as MlpJSON) : createModel(mulberry32(o.seed));
+const hidden = args.hidden ? args.hidden.split(',').map(Number) : undefined; // e.g. --hidden 512,256
+const net = args.init ? loadModel(JSON.parse(readFileSync(args.init, 'utf8')) as MlpJSON) : createModel(mulberry32(o.seed), hidden);
 console.log(`${decisions.length} decisions from ${files.length} file(s); net ${net.sizes.join('-')}${args.init ? ` from ${args.init}` : ''}`);
 
 const t0 = performance.now();

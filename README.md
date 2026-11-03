@@ -16,7 +16,9 @@ src/ml/       self-play training
   mlp.ts          dependency-free neural net (same code in Node and browser)
   features.ts     the shared encoding of an observation + move
   dmc.ts          Deep Monte Carlo agent
-  train*.ts       training loop (single-threaded and worker threads)
+  train*.ts       self-play training loop (single-threaded and worker threads)
+  distill.ts      learning from ISMCTS (data generation + supervised training)
+  dataset.ts      compact binary format for search data
 src/runner.ts play a full game with one agent per seat
 src/cli/      tournament, terminal play, training
 scripts/      one-off analysis (game length, profiling)
@@ -32,6 +34,8 @@ npm test
 npm run play -- --bots ismcts,heuristic,heuristic          # you are seat 0
 npm run tournament -- --bots ismcts,heuristic,heuristic,heuristic --games 100
 npm run train -- --hands 300000                             # writes models/doughnut.json
+npm run gen-data -- --hands 15000 --iterations 1000         # ISMCTS teacher data -> data/
+npm run distill -- --data data/doughnut-ismcts.bin          # train the network on it
 ```
 
 Bots: `random`, `heuristic`, `ismcts`, `ismcts:<iterations>` (default 1500), `dmc:<model.json>`. Modes: `--mode doughnut | doughnut-20`.
@@ -88,3 +92,14 @@ A mode is a `GameConfig` object in `modes.ts`. Most variants are a few fields, e
 Against three heuristic bots the model wins ~50%. It plateaued after ~150k hands, so more self-play alone won't close the gap to ISMCTS.
 
 Options: `--hands`, `--workers` (default cores − 1; `1` is single-threaded), `--eval-every`, `--eval-games`, `--lr`, `--replay-ratio`, `--seed`, `--mode`.
+
+## Learning from ISMCTS (distillation)
+
+Self-play plateaus because the model can only learn as well as it already plays. Distillation instead trains it on a stronger player's judgement:
+
+1. `npm run gen-data` has ISMCTS play training hands (same bounded single-hand episodes and sampled scoreboards as above; 20% heuristic seats). At every decision it records ISMCTS's value estimate for **every** legal move, not just the one played, plus the hand's actual outcome. Workers run in parallel and write to `data/*.bin` (~270 bytes per decision, sparse). This is the slow part: about 3 hands/s on 4 cores at 1,000 iterations.
+2. `npm run distill` trains the network to predict those values. Target for the move played: half search value, half actual outcome. Other moves: search value, if searched at least 20 times. Validation is split by decision. After each epoch it evaluates against heuristic bots and keeps the best.
+
+Options for `gen-data`: `--hands`, `--iterations`, `--workers`, `--explore` (chance of a visit-weighted random move, default 0.1), `--heuristic-seats`, `--out`. For `distill`: `--data a.bin,b.bin`, `--init <model>` (start from an existing model), `--hidden 512,256` (fresh network size), `--epochs`, `--lr`, `--alpha`, `--min-visits`, `--out`.
+
+Data files can be combined, so more data can be generated later and added. They record `FEATURE_VERSION` and are rejected if the encoding changes.
