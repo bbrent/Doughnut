@@ -8,7 +8,9 @@
     "typecheck": "tsc --noEmit",
     "tournament": "tsx src/cli/tournament.ts",
     "play": "tsx src/cli/play.ts",
-    "train": "tsx src/cli/train.ts"
+    "train": "tsx src/cli/train.ts",
+    "gen-data": "tsx src/cli/gen-data.ts",
+    "distill": "tsx src/cli/distill.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

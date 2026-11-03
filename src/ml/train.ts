@@ -92,18 +92,27 @@ export interface HandSamples {
   ys: number[];
 }
 
-/** Play one training hand from a random scoreboard; returns the model's (input, reward) samples. */
-export function playTrainingHand(net: Mlp, opts: TrainOptions, epsilon: number, rng: Rng, heur: Agent): HandSamples {
+/**
+ * Start a training hand: random player count, random scoreboard (or a fresh
+ * game), random dealer. `learnerSeat[p]` marks seats played by the learner;
+ * the rest are heuristic bots. At least one seat is always a learner seat.
+ */
+export function sampleTrainingStart(opts: TrainOptions, rng: Rng) {
   const n = samplePlayers(opts.playerWeights, rng);
   const [lo, hi] = opts.scoreRange;
   const scores =
     rng() < opts.freshStartFrac
       ? Array(n).fill(opts.config.scoring.startScore)
       : Array.from({ length: n }, () => lo + randInt(rng, hi - lo + 1));
-  const s = newGame(opts.config, n, Math.floor(rng() * 2 ** 32), randInt(rng, n), scores);
-  // Always at least one model seat.
-  const modelSeat = Array.from({ length: n }, () => rng() >= opts.heuristicSeatFrac);
-  modelSeat[randInt(rng, n)] = true;
+  const state = newGame(opts.config, n, Math.floor(rng() * 2 ** 32), randInt(rng, n), scores);
+  const learnerSeat = Array.from({ length: n }, () => rng() >= opts.heuristicSeatFrac);
+  learnerSeat[randInt(rng, n)] = true;
+  return { state, learnerSeat };
+}
+
+/** Play one training hand from a random scoreboard; returns the model's (input, reward) samples. */
+export function playTrainingHand(net: Mlp, opts: TrainOptions, epsilon: number, rng: Rng, heur: Agent): HandSamples {
+  const { state: s, learnerSeat: modelSeat } = sampleTrainingStart(opts, rng);
 
   const pending: { x: Float32Array; p: number }[] = [];
   while (s.phase !== 'handOver' && s.phase !== 'gameOver') {
