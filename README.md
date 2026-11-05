@@ -26,11 +26,40 @@ scripts/      one-off analysis (game length, profiling)
 
 Agents only receive an `Observation` (their own hand + public info), never the full state, so no bot can cheat.
 
+## Play online / deploy
+
+`npm run build` produces everything the host needs:
+
+```
+dist/server.cjs      the whole server in one file (ws included, no native modules)
+dist/public/         the web client (index.html, app.js, styles.css, models/doughnut.json)
+models/doughnut.json the bots' model (read by the server)
+```
+
+Run with `node dist/server.cjs` (or `npm start`) from the project folder. Settings come from environment variables:
+
+| Variable | Default | |
+|---|---|---|
+| `PORT` | 3000 | port to listen on (most hosts set this) |
+| `APP_ROOT` | current directory | where `dist/` and `models/` live |
+| `PUBLIC_DIR` | `$APP_ROOT/dist/public` | |
+| `MODEL_PATH` | `$APP_ROOT/models/doughnut.json` | without it, bots use the heuristic |
+
+To deploy, upload `dist/` and `models/` (no `npm install` needed on the host) and set the start file to `dist/server.cjs`. The server must run as **one long-lived process**: games live in memory, and players stay connected over a WebSocket at `/ws`. Things to check with the host:
+- **WebSockets** must be allowed through their proxy. Shared hosts that run Node behind Phusion Passenger (common with cPanel's "Setup Node.js App") usually support them, but some plans don't.
+- **One instance only:** no clustering or multiple workers, or players at the same table could land on different processes.
+- **Idle shutdown:** if the host stops the app when idle, games in progress are lost (players just start a new one).
+
+`GET /health` returns `{ ok, tables, model }`.
+
+What's in it: guests (a name plus a random token kept in the browser, so a reload rejoins the same seat), private tables with a 5-letter code and invite link, quick match (4 seats; bots fill in after 10 s), and offline practice that runs the same table code in the browser. The server is the only authority: each player receives only their own view, and every move is checked by the engine. Bots fill empty seats, play for anyone who misses the 30 s turn timer, and cover disconnected players within 1.5 s until they reconnect. Code: `src/game/` (table, lobby, protocol; no Node dependencies), `src/server/` (HTTP + WebSocket), `src/client/` (plain TypeScript, no framework).
+
 ## Commands
 
 ```sh
 npm install
 npm test
+npm run serve                                               # build, then serve on http://localhost:3000
 npm run play -- --bots ismcts,heuristic,heuristic          # you are seat 0
 npm run tournament -- --bots ismcts,heuristic,heuristic,heuristic --games 100
 npm run train -- --hands 300000                             # writes models/doughnut.json
