@@ -10,13 +10,12 @@ import {
   DEFAULT_DISTILL,
   FEATURE_VERSION,
   createModel,
-  decodeDecisions,
   distill,
   evaluate,
   loadModel,
-  type Decision,
   type MlpJSON,
 } from '../ml';
+import { loadSearchData } from '../ml/load-data';
 import { parseArgs } from './bots';
 
 const args = parseArgs(process.argv.slice(2));
@@ -32,12 +31,7 @@ const o = {
 };
 const evalGames = Number(args['eval-games'] ?? 200);
 
-const decisions: Decision[] = [];
-for (const f of files) {
-  const meta = JSON.parse(readFileSync(f + '.meta.json', 'utf8'));
-  if (meta.featureVersion !== FEATURE_VERSION) throw new Error(`${f}: feature version ${meta.featureVersion} != ${FEATURE_VERSION}; regenerate`);
-  for (const d of decodeDecisions(new Uint8Array(readFileSync(f)))) decisions.push(d);
-}
+const decisions = loadSearchData(files);
 const hidden = args.hidden ? args.hidden.split(',').map(Number) : undefined; // e.g. --hidden 512,256
 const net = args.init ? loadModel(JSON.parse(readFileSync(args.init, 'utf8')) as MlpJSON) : createModel(mulberry32(o.seed), hidden);
 console.log(`${decisions.length} decisions from ${files.length} file(s); net ${net.sizes.join('-')}${args.init ? ` from ${args.init}` : ''}`);

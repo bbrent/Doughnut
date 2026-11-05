@@ -2,7 +2,7 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { heuristicAgent } from '../ai/heuristic';
 import { MODES, mulberry32 } from '../engine';
-import { encodeDecisions } from './dataset';
+import { encodeRecords } from './dataset';
 import { generateHand, type GenerateOptions } from './distill';
 import type { TrainOptions } from './train';
 
@@ -18,7 +18,7 @@ const heur = heuristicAgent();
 
 for (;;) {
   const ds = [];
-  for (let h = 0; h < chunk; h++) ds.push(...generateHand(opts, gen, rng, heur));
-  const bytes = encodeDecisions(ds);
+  for (let h = 0; h < chunk; h++) for (const r of generateHand(opts, gen, rng, heur)) ds.push(r);
+  const bytes = encodeRecords(ds);
   parentPort!.postMessage({ bytes, hands: chunk, decisions: ds.length }, [bytes.buffer as ArrayBuffer]);
 }

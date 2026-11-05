@@ -157,31 +157,39 @@ describe('training', () => {
 });
 
 describe('distillation', () => {
-  it('dataset encoding round-trips and tolerates a truncated tail', async () => {
-    const { encodeDecisions, decodeDecisions, generateHand, DEFAULT_TRAIN } = await import('../src/ml');
+  it('dataset stores raw observations that round-trip exactly', async () => {
+    const { encodeRecords, decodeRecords, generateHand, featurize, DEFAULT_TRAIN } = await import('../src/ml');
     const { DEFAULT_ISMCTS } = await import('../src/ai');
     const rng = mulberry32(11);
     const opts = { ...DEFAULT_TRAIN, config: DOUGHNUT };
-    const ds = [0, 1, 2].flatMap(() => generateHand(opts, { search: { ...DEFAULT_ISMCTS, iterations: 40 }, exploreProb: 0.2 }, rng, heuristicAgent()));
-    expect(ds.length).toBeGreaterThan(0);
-    for (const d of ds) {
-      expect(d.actions.filter((a) => a.chosen)).toHaveLength(1);
-      expect(d.actions.reduce((a, x) => a + x.visits, 0)).toBeGreaterThan(0);
+    const rs = [0, 1, 2, 3].flatMap(() => generateHand(opts, { search: { ...DEFAULT_ISMCTS, iterations: 40 }, exploreProb: 0.2 }, rng, heuristicAgent()));
+    expect(rs.length).toBeGreaterThan(0);
+    for (const r of rs) {
+      expect(r.moves.filter((m) => m.chosen)).toHaveLength(1);
+      expect(r.moves).toHaveLength(r.obs.legalMoves.length);
     }
-    const bytes = encodeDecisions(ds);
-    const back = decodeDecisions(bytes);
-    expect(back).toHaveLength(ds.length);
-    expect(Array.from(back[0].state.idx)).toEqual(Array.from(ds[0].state.idx));
-    expect(back[ds.length - 1].outcome).toBeCloseTo(ds[ds.length - 1].outcome, 6);
-    expect(decodeDecisions(bytes.subarray(0, bytes.length - 3))).toHaveLength(ds.length - 1);
+    const bytes = encodeRecords(rs);
+    const back = decodeRecords(bytes, DOUGHNUT);
+    expect(back).toHaveLength(rs.length);
+    back.forEach((b, i) => {
+      const { config: _c1, ...a } = rs[i].obs;
+      const { config: _c2, ...bb } = b.obs;
+      expect(bb).toEqual(a);
+      expect(b.moves.map((m) => m.visits)).toEqual(rs[i].moves.map((m) => m.visits));
+      expect(b.outcome).toBeCloseTo(rs[i].outcome, 6);
+      expect(Array.from(featurize(b).state.val)).toEqual(Array.from(featurize(rs[i]).state.val));
+    });
+    expect(decodeRecords(bytes.subarray(0, bytes.length - 3), DOUGHNUT)).toHaveLength(rs.length - 1);
   });
 
   it('distil reduces loss on searched decisions', async () => {
-    const { generateHand, distill, DEFAULT_TRAIN, DEFAULT_DISTILL } = await import('../src/ml');
+    const { generateHand, distill, featurize, DEFAULT_TRAIN, DEFAULT_DISTILL } = await import('../src/ml');
     const { DEFAULT_ISMCTS } = await import('../src/ai');
     const rng = mulberry32(12);
     const opts = { ...DEFAULT_TRAIN, config: DOUGHNUT };
-    const ds = Array.from({ length: 30 }).flatMap(() => generateHand(opts, { search: { ...DEFAULT_ISMCTS, iterations: 40 }, exploreProb: 0.1 }, rng, heuristicAgent()));
+    const ds = Array.from({ length: 30 })
+      .flatMap(() => generateHand(opts, { search: { ...DEFAULT_ISMCTS, iterations: 40 }, exploreProb: 0.1 }, rng, heuristicAgent()))
+      .map(featurize);
     const net = createModel(mulberry32(13), [32, 16]);
     const losses: number[] = [];
     distill(net, ds, { ...DEFAULT_DISTILL, epochs: 8, batchSize: 32, lr: 3e-3, valFrac: 0 }, (_e, train) => losses.push(train));

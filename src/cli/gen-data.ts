@@ -9,7 +9,7 @@ import { dirname } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { DEFAULT_ISMCTS } from '../ai';
 import { MODES } from '../engine';
-import { DEFAULT_TRAIN, FEATURE_VERSION, type GenerateOptions } from '../ml';
+import { DATA_FORMAT, DEFAULT_TRAIN, type GenerateOptions } from '../ml';
 import { parseArgs } from './bots';
 
 const args = parseArgs(process.argv.slice(2));
@@ -37,7 +37,7 @@ let lastLog = 0;
 const writeMeta = () =>
   writeFileSync(
     out + '.meta.json',
-    JSON.stringify({ featureVersion: FEATURE_VERSION, mode: config.id, hands: done, decisions, iterations: gen.search.iterations, seed }, null, 2),
+    JSON.stringify({ format: DATA_FORMAT, mode: config.id, hands: done, decisions, iterations: gen.search.iterations, seed }, null, 2),
   );
 const workers = Array.from(
   { length: nWorkers },

@@ -9,8 +9,8 @@
 import type { Agent } from '../ai/agent';
 import { handRewards, ismctsSearch, type IsmctsOptions } from '../ai/ismcts';
 import { applyUnchecked, moveKey, mulberry32, observe, shuffle, type Rng } from '../engine';
-import { scatter, toSparse, type Decision, type Sparse } from './dataset';
-import { encodeAction, encodeState, makeContext, INPUT_SIZE, STATE_SIZE } from './features';
+import { scatter, type Decision, type SearchRecord, type Sparse } from './dataset';
+import { INPUT_SIZE, STATE_SIZE } from './features';
 import type { Mlp } from './mlp';
 import { sampleTrainingStart, type TrainOptions } from './train';
 
@@ -21,9 +21,9 @@ export interface GenerateOptions {
 }
 
 /** Play one training hand with ISMCTS at the learner seats, recording every searched decision. */
-export function generateHand(opts: TrainOptions, gen: GenerateOptions, rng: Rng, heur: Agent): Decision[] {
+export function generateHand(opts: TrainOptions, gen: GenerateOptions, rng: Rng, heur: Agent): SearchRecord[] {
   const { state: s, learnerSeat } = sampleTrainingStart(opts, rng);
-  const recorded: { d: Decision; p: number }[] = [];
+  const recorded: { d: SearchRecord; p: number }[] = [];
 
   while (s.phase !== 'handOver' && s.phase !== 'gameOver') {
     const p = s.toAct;
@@ -46,17 +46,11 @@ export function generateHand(opts: TrainOptions, gen: GenerateOptions, rng: Rng,
         break;
       }
     }
-    const ctx = makeContext(obs);
-    const d: Decision = {
-      state: toSparse(encodeState(ctx)),
-      actions: obs.legalMoves.map((m) => {
+    const d: SearchRecord = {
+      obs,
+      moves: obs.legalMoves.map((m) => {
         const st = byKey.get(moveKey(m));
-        return {
-          feat: toSparse(encodeAction(ctx, m)),
-          value: st?.value ?? 0,
-          visits: st?.visits ?? 0,
-          chosen: moveKey(m) === moveKey(chosen),
-        };
+        return { value: st?.value ?? 0, visits: st?.visits ?? 0, chosen: moveKey(m) === moveKey(chosen) };
       }),
       outcome: 0,
     };
