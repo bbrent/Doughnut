@@ -28,13 +28,16 @@ const o = {
   lr: Number(args.lr ?? DEFAULT_DISTILL.lr),
   alpha: Number(args.alpha ?? DEFAULT_DISTILL.alpha),
   minVisits: Number(args['min-visits'] ?? DEFAULT_DISTILL.minVisits),
+  loss: (args.loss ?? DEFAULT_DISTILL.loss) as 'value' | 'policy',
+  tau: Number(args.tau ?? DEFAULT_DISTILL.tau),
+  policyWeight: Number(args['policy-weight'] ?? DEFAULT_DISTILL.policyWeight),
 };
 const evalGames = Number(args['eval-games'] ?? 200);
 
 const decisions = loadSearchData(files);
 const hidden = args.hidden ? args.hidden.split(',').map(Number) : undefined; // e.g. --hidden 512,256
 const net = args.init ? loadModel(JSON.parse(readFileSync(args.init, 'utf8')) as MlpJSON) : createModel(mulberry32(o.seed), hidden);
-console.log(`${decisions.length} decisions from ${files.length} file(s); net ${net.sizes.join('-')}${args.init ? ` from ${args.init}` : ''}`);
+console.log(`${decisions.length} decisions from ${files.length} file(s); net ${net.sizes.join('-')}${args.init ? ` from ${args.init}` : ''}; loss ${o.loss}${o.loss === 'policy' ? ` (tau ${o.tau}, weight ${o.policyWeight})` : ''}`);
 
 const t0 = performance.now();
 let best = -1;

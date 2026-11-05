@@ -190,9 +190,37 @@ describe('distillation', () => {
     const ds = Array.from({ length: 30 })
       .flatMap(() => generateHand(opts, { search: { ...DEFAULT_ISMCTS, iterations: 40 }, exploreProb: 0.1 }, rng, heuristicAgent()))
       .map(featurize);
-    const net = createModel(mulberry32(13), [32, 16]);
-    const losses: number[] = [];
-    distill(net, ds, { ...DEFAULT_DISTILL, epochs: 8, batchSize: 32, lr: 3e-3, valFrac: 0 }, (_e, train) => losses.push(train));
-    expect(losses[losses.length - 1]).toBeLessThan(losses[0]);
+    for (const loss of ['value', 'policy'] as const) {
+      const net = createModel(mulberry32(13), [32, 16]);
+      const losses: number[] = [];
+      distill(net, ds, { ...DEFAULT_DISTILL, loss, epochs: 8, batchSize: 32, decisionsPerBatch: 8, lr: 3e-3, valFrac: 0 }, (_e, train) => losses.push(train));
+      expect(losses[losses.length - 1]).toBeLessThan(losses[0]);
+    }
+  });
+});
+
+describe('features v2', () => {
+  it('flags safe and wasted winning cards for the last player in a trick', async () => {
+    const { cloneState, parseCard, suitOf } = await import('../src/engine');
+    const c = (x: string) => x.split(' ').map(parseCard);
+    let s = cloneState(newGame(DOUGHNUT, 3, 1));
+    s.hands = [c('2H 3C 4C 5C 6C'), c('3H 7C 8C 9C 10C'), c('KH AH 2S 3S 4S')];
+    s.turnUp = parseCard('2D');
+    s.trump = suitOf(s.turnUp);
+    s.dealer = 2;
+    s.playing = [true, true, true];
+    s.phase = 'play';
+    s.toAct = s.trickLeader = 0;
+    s.startScores = s.scores.slice();
+    s = applyMove(s, { kind: 'card', card: parseCard('2H') });
+    s = applyMove(s, { kind: 'card', card: parseCard('3H') });
+    const o = observe(s, 2);
+    const ctx = makeContext(o);
+    const enc = (card: string) => encodeAction(ctx, { kind: 'card', card: parseCard(card) });
+    const tail = (a: Float32Array) => Array.from(a.slice(ACTION_SIZE - 9));
+    const [, safeK, wastedK] = tail(enc('KH'));
+    const [, safeA, wastedA] = tail(enc('AH'));
+    expect([safeK, wastedK]).toEqual([1, 0]);
+    expect([safeA, wastedA]).toEqual([1, 1]); // K would also win
   });
 });

@@ -7,10 +7,10 @@
  *
  * Bump FEATURE_VERSION whenever the layout changes; saved models record it.
  */
-import { playStrength, rankOf, rulesFor, type Card, type Move, type Observation, playedCards } from '../engine';
+import { buildDeck, playStrength, rankOf, rulesFor, type Card, type Move, type Observation, playedCards } from '../engine';
 import { estimateTricks, viewFromObservation } from '../ai/heuristic';
 
-export const FEATURE_VERSION = 1;
+export const FEATURE_VERSION = 2;
 
 class Writer {
   i = 0;
@@ -38,6 +38,12 @@ export interface EncodeContext {
   ledSuit: number | null;
   bestStrength: number;
   opponents: number;
+  /** Live cards the player can't see (in other hands), per effective suit: ranks. */
+  unseenRanks: number[][];
+  /** Active players who still have to play to the current trick (excluding me). */
+  yetToAct: number[];
+  /** Player currently winning the trick, or -1. */
+  winner: number;
 }
 
 export function makeContext(o: Observation): EncodeContext {
@@ -63,19 +69,45 @@ export function makeContext(o: Observation): EncodeContext {
     if (p !== o.player) opponents += pl === true ? 1 : pl === null ? 0.5 : 0;
   });
 
+  const outOfPlay = new Set(playedCards(o));
+  const mine = new Set(o.hand);
+  const unseenRanks: number[][] = [[], [], [], []];
+  for (const c of buildDeck(o.config.deck.suits, o.config.deck.ranks)) {
+    const deadTurnUp = c === o.turnUp && !o.dealerTookTurnUp;
+    const ownDiscard = c === o.ownDiscard;
+    if (mine.has(c) || outOfPlay.has(c) || deadTurnUp || ownDiscard) continue;
+    unseenRanks[eff(c)].push(rankOf(c));
+  }
+  const played = new Set(o.currentTrick.map((p) => p.player));
+  const yetToAct = o.phase === 'play' ? o.playing.flatMap((pl, p) => (pl && p !== o.player && !played.has(p) ? [p] : [])) : [];
+  let winner = -1;
+  if (ledSuit !== null) {
+    let bs = -Infinity;
+    for (const pl of o.currentTrick) {
+      const st = playStrength(rules, pl.card, ledSuit, o.trump);
+      if (st > bs) {
+        bs = st;
+        winner = pl.player;
+      }
+    }
+  }
+
   return {
     obs: o,
     slotIndex: (c) => slotOfSuit[eff(c)] * 13 + rankOf(c),
     slotOfSuit,
-    outOfPlay: new Set(playedCards(o)),
+    outOfPlay,
     ledSuit,
     bestStrength,
     opponents: Math.max(1, opponents),
+    unseenRanks,
+    yetToAct,
+    winner,
   };
 }
 
-export const STATE_SIZE = 3 + 4 + 5 + 13 + 7 + 5 + 5 + 1 + 5 + 52 * 3 + 4 + 1;
-export const ACTION_SIZE = 6 + 52 + 6;
+export const STATE_SIZE = 3 + 4 + 5 + 13 + 7 + 5 + 5 + 1 + 5 + 52 * 3 + 4 + 1 + 12;
+export const ACTION_SIZE = 6 + 52 + 6 + 9;
 export const INPUT_SIZE = STATE_SIZE + ACTION_SIZE;
 
 const PHASES = ['exchange', 'declare', 'play'];
@@ -147,6 +179,32 @@ export function encodeState(ctx: EncodeContext): Float32Array {
 
   w.push(others.filter((p) => o.playing[p] === true && o.tricksWon[p] === 0).length / 10);
 
+  // v2: card-play context.
+  const trump = o.trump;
+  const unseenTrumps = trump === null ? 0 : ctx.unseenRanks[trump].length;
+  const myTrumps = trump === null ? [] : o.hand.filter((c) => rules.effectiveSuit(c, trump) === trump).map(rankOf);
+  const myTopTrump = myTrumps.length ? Math.max(...myTrumps) : -1;
+  const ledUnseen = ctx.ledSuit === null ? 0 : ctx.unseenRanks[ctx.ledSuit].length;
+  const after = ctx.yetToAct;
+  const voidInLed = ctx.ledSuit === null ? 0 : after.filter((p) => o.voids[p][ctx.ledSuit!]).length;
+  const canTrumpAfter = ctx.ledSuit === null || trump === null ? 0 : after.filter((p) => o.voids[p][ctx.ledSuit!] && !o.voids[p][trump]).length;
+  const lowestOpp = Math.min(...others.map((p) => o.startScores[p]));
+  const w0 = ctx.winner;
+  w.push(
+    unseenTrumps / 13,
+    trump === null ? 0 : ctx.unseenRanks[trump].filter((r) => r > myTopTrump).length / 13,
+    myTrumps.length / 5,
+    ledUnseen / 13,
+    after.length / 10,
+    voidInLed / 10,
+    canTrumpAfter / 10,
+    after.length === 0 && o.currentTrick.length > 0 ? 1 : 0,
+    w0 >= 0 ? o.startScores[w0] / 20 : 0,
+    w0 >= 0 ? o.tricksWon[w0] / handSize : 0,
+    w0 >= 0 && w0 !== me && o.startScores[w0] <= lowestOpp ? 1 : 0,
+    (handSize - o.tricks.length) / Math.max(1, handSize - myTricks),
+  );
+
   if (w.i !== STATE_SIZE) throw new Error(`state size ${w.i} != ${STATE_SIZE}`);
   return w.out;
 }
@@ -167,6 +225,7 @@ export function encodeAction(ctx: EncodeContext, m: Move): Float32Array {
   if (card === null) {
     const est = m.kind === 'declare' && m.play ? estimateTricks(viewFromObservation(o), o.hand, ctx.opponents) : 0;
     w.push(0, 0, 0, 0, 0, est / o.config.handSize);
+    w.push(0, 0, 0, 0, 0, 0, 0, 0, 0);
   } else {
     const s = rules.effectiveSuit(card, o.trump);
     const isTrump = s === o.trump ? 1 : 0;
@@ -187,6 +246,37 @@ export function encodeAction(ctx: EncodeContext, m: Move): Float32Array {
       after = estimateTricks(viewFromObservation(o), five, ctx.opponents) / o.config.handSize;
     }
     w.push(isTrump, rankOf(card) / 12, winsNow, boss, suitCount / 5, after);
+
+    // v2: consequences of playing this card.
+    const r = rankOf(card);
+    const higherUnseen = ctx.unseenRanks[s].filter((x) => x > r).length;
+    let safe = 0;
+    let wasted = 0;
+    let rankAmongLegal = 0;
+    let isLowestLegal = 0;
+    if (m.kind === 'card') {
+      const led = ctx.ledSuit ?? s;
+      const st = playStrength(rules, card, led, o.trump);
+      const beats = ctx.ledSuit === null || st > ctx.bestStrength;
+      // Nobody still to act can beat it: no unseen higher card of its suit, and
+      // (if it isn't trump) nobody after us can trump in.
+      // When leading, everyone else active is still to act.
+      const canBeTrumped =
+        !isTrump && o.trump !== null && ctx.unseenRanks[o.trump].length > 0 && ctx.yetToAct.some((p) => o.voids[p][led]);
+      const othersLeft = ctx.yetToAct.length;
+      if (beats && (othersLeft === 0 || (higherUnseen === 0 && !canBeTrumped))) safe = 1;
+      const legal = o.legalMoves.flatMap((x) => (x.kind === 'card' ? [x.card] : []));
+      const strengths = legal.map((c) => playStrength(rules, c, led, o.trump));
+      if (ctx.ledSuit !== null && beats && othersLeft === 0) {
+        wasted = strengths.some((x) => x > ctx.bestStrength && x < st) ? 1 : 0;
+      }
+      rankAmongLegal = legal.length > 1 ? strengths.filter((x) => x < st).length / (legal.length - 1) : 0;
+      isLowestLegal = strengths.every((x) => x >= st) ? 1 : 0;
+    }
+    const trumpsLeftAfter = o.hand.filter((c) => c !== card && rules.effectiveSuit(c, o.trump) === o.trump).length;
+    const voidAfter = suitCount === 1 ? 1 : 0;
+    const leading = m.kind === 'card' && ctx.ledSuit === null ? 1 : 0;
+    w.push(higherUnseen / 12, safe, wasted, rankAmongLegal, isLowestLegal, trumpsLeftAfter / 5, voidAfter, leading, leading * isTrump);
   }
 
   if (w.i !== ACTION_SIZE) throw new Error(`action size ${w.i} != ${ACTION_SIZE}`);

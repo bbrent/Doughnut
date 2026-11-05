@@ -75,6 +75,16 @@ export interface DistillOptions {
   minVisits: number;
   valFrac: number;
   seed: number;
+  /**
+   * 'value': regress each move's value. 'policy': also match the search's
+   * visit distribution with softmax(Q / tau), which trains the *differences*
+   * between moves directly (what decides play) instead of absolute values.
+   */
+  loss: 'value' | 'policy';
+  tau: number;
+  policyWeight: number;
+  /** Decisions per minibatch in 'policy' mode. */
+  decisionsPerBatch: number;
 }
 
 export const DEFAULT_DISTILL: DistillOptions = {
@@ -86,6 +96,10 @@ export const DEFAULT_DISTILL: DistillOptions = {
   minVisits: 20,
   valFrac: 0.05,
   seed: 1,
+  loss: 'policy',
+  tau: 0.05,
+  policyWeight: 1,
+  decisionsPerBatch: 64,
 };
 
 export interface Sample {
@@ -143,6 +157,54 @@ export function agreement(net: Mlp, decisions: Decision[]): number {
   return decisions.length ? hit / decisions.length : NaN;
 }
 
+/** One minibatch of the combined policy + value loss over whole decisions. */
+function policyStep(net: Mlp, batch: Decision[], o: DistillOptions, lr: number): number {
+  const xs: Float32Array[] = [];
+  const spans: [number, number][] = [];
+  for (const d of batch) {
+    const start = xs.length;
+    for (const a of d.actions) {
+      const x = new Float32Array(INPUT_SIZE);
+      scatter(d.state, x);
+      scatter(a.feat, x, STATE_SIZE);
+      xs.push(x);
+    }
+    spans.push([start, xs.length]);
+  }
+  return net.trainWith(
+    xs,
+    (q) => {
+      const dy = new Array(q.length).fill(0);
+      let ce = 0;
+      let se = 0;
+      let nv = 0;
+      batch.forEach((d) => d.actions.forEach((a) => (a.chosen || a.visits >= o.minVisits) && nv++));
+      batch.forEach((d, k) => {
+        const [lo, hi] = spans[k];
+        const total = d.actions.reduce((s, a) => s + a.visits, 0) || 1;
+        let max = -Infinity;
+        for (let i = lo; i < hi; i++) max = Math.max(max, q[i] / o.tau);
+        let z = 0;
+        for (let i = lo; i < hi; i++) z += Math.exp(q[i] / o.tau - max);
+        d.actions.forEach((a, j) => {
+          const i = lo + j;
+          const p = Math.exp(q[i] / o.tau - max) / z;
+          const pi = a.visits / total;
+          if (pi > 0) ce -= pi * Math.log(Math.max(p, 1e-12));
+          dy[i] += (o.policyWeight * (p - pi)) / o.tau / batch.length;
+          if (a.chosen || a.visits >= o.minVisits) {
+            const t = a.chosen ? o.alpha * a.value + (1 - o.alpha) * d.outcome : a.value;
+            se += (q[i] - t) ** 2;
+            dy[i] += (2 * (q[i] - t)) / nv;
+          }
+        });
+      });
+      return { loss: (o.policyWeight * ce) / batch.length + se / Math.max(1, nv), dy };
+    },
+    lr,
+  );
+}
+
 /**
  * Supervised training on searched decisions. The validation split is by
  * decision (not by sample) so moves from one position never straddle it.
@@ -159,18 +221,28 @@ export function distill(
   const valDecisions = ds.slice(0, nVal);
   const val = buildSamples(valDecisions, o);
   const train = buildSamples(ds.slice(nVal), o);
-  const steps = o.epochs * Math.floor(train.length / o.batchSize);
+  const trainDecisions = ds.slice(nVal);
+  const perEpoch = o.loss === 'policy' ? Math.floor(trainDecisions.length / o.decisionsPerBatch) : Math.floor(train.length / o.batchSize);
+  const steps = o.epochs * perEpoch;
   let step = 0;
 
   for (let e = 1; e <= o.epochs; e++) {
-    shuffle(train, rng);
     let sum = 0;
     let n = 0;
-    for (let i = 0; i + o.batchSize <= train.length; i += o.batchSize) {
-      const lr = o.lr * (1 - (1 - o.lrEndFrac) * (step++ / steps));
-      const batch = train.slice(i, i + o.batchSize);
-      sum += net.trainBatch(batch.map(densify), batch.map((s) => s.target), lr);
-      n++;
+    const lrNow = () => o.lr * (1 - (1 - o.lrEndFrac) * (step++ / steps));
+    if (o.loss === 'policy') {
+      shuffle(trainDecisions, rng);
+      for (let i = 0; i + o.decisionsPerBatch <= trainDecisions.length; i += o.decisionsPerBatch) {
+        sum += policyStep(net, trainDecisions.slice(i, i + o.decisionsPerBatch), o, lrNow());
+        n++;
+      }
+    } else {
+      shuffle(train, rng);
+      for (let i = 0; i + o.batchSize <= train.length; i += o.batchSize) {
+        const batch = train.slice(i, i + o.batchSize);
+        sum += net.trainBatch(batch.map(densify), batch.map((s) => s.target), lrNow());
+        n++;
+      }
     }
     onEpoch(e, sum / Math.max(1, n), mse(net, val), agreement(net, valDecisions));
   }

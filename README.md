@@ -87,36 +87,44 @@ Options: `--hands`, `--workers` (default cores − 1; `1` is single-threaded), `
 
 Self-play plateaus because the model can only learn as well as it already plays. Distillation instead trains it on a stronger player's judgement:
 
-1. `npm run gen-data` has ISMCTS play training hands (same bounded single-hand episodes and sampled scoreboards as above; 20% heuristic seats). At every decision it records ISMCTS's value estimate for **every** legal move, not just the one played, plus the hand's actual outcome. Workers run in parallel and write to `data/*.bin` (~270 bytes per decision, sparse). This is the slow part: about 3 hands/s on 4 cores at 1,000 iterations.
-2. `npm run distill` trains the network to predict those values. Target for the move played: half search value, half actual outcome. Other moves: search value, if searched at least 20 times. Validation is split by decision. After each epoch it evaluates against heuristic bots and keeps the best.
+1. `npm run gen-data` has ISMCTS play training hands (same bounded single-hand episodes and sampled scoreboards as above; 20% heuristic seats). At every decision it records ISMCTS's value estimate and visit count for **every** legal move, not just the one played, plus the hand's actual outcome. Workers run in parallel and write to `data/*.bin`. Files store the **raw observation** (what the player could see, ~125 bytes per decision), not encoded features, so the encoding can change without re-running the search. This is the slow part: about 4 hands/s on 4 cores at 1,000 iterations.
+2. `npm run distill` computes features with the current encoding and trains the network. The default loss (`--loss policy`) has two parts:
+   - **policy:** softmax(Q / tau) over the legal moves should match the search's visit distribution. This trains the *differences* between moves, which decide play.
+   - **value:** Q should match the search values (for the move played, half search value and half actual outcome). This keeps the scale meaningful.
 
-Options for `gen-data`: `--hands`, `--iterations`, `--workers`, `--explore` (chance of a visit-weighted random move, default 0.1), `--heuristic-seats`, `--out`. For `distill`: `--data a.bin,b.bin`, `--init <model>` (start from an existing model), `--hidden 512,256` (fresh network size), `--epochs`, `--lr`, `--alpha`, `--min-visits`, `--out`.
+   `--loss value` uses only the second part. It turned out to be the bottleneck: most of its error goes into how good the position is, which is shared by all moves, so the small gaps between candidate cards were lost. Validation is split by decision. After each epoch it reports validation loss, agreement with the search, and wins against heuristic bots.
 
-Data files can be combined, so more data can be generated later and added. They record `FEATURE_VERSION` and are rejected if the encoding changes.
+Options for `gen-data`: `--hands`, `--iterations`, `--workers`, `--explore` (chance of a visit-weighted random move, default 0.1), `--heuristic-seats`, `--out`. For `distill`: `--data a.bin,b.bin`, `--init <model>` (start from an existing model), `--hidden 512,256` (fresh network size), `--epochs`, `--lr`, `--loss policy|value`, `--tau` (default 0.05; 0.1 was slightly better), `--policy-weight`, `--alpha`, `--min-visits`, `--out`.
 
-`npx tsx scripts/agreement.ts <test.bin> <model.json>...` compares models against ISMCTS on held-out search data, per decision type: how often they pick the search's top move, and the *regret* (search value given up by not picking it).
+Data files can be combined, so more data can be generated later and added. Models record `FEATURE_VERSION` and refuse to load if the encoding has changed (retrain them); data files only need the same `DATA_FORMAT`.
+
+`npx tsx scripts/agreement.ts <test.bin> <model.json>...` compares models against ISMCTS on held-out search data, per decision type: how often they pick the search's top move, and the *regret* (search value given up by not picking it). `npx tsx scripts/search-noise.ts <test.bin>` re-runs ISMCTS on the same positions and scores it the same way, which gives the noise floor: a model at that level matches the search as closely as this measure can tell.
 
 ## Results
 
-`models/doughnut.json`: 275k self-play hands, then distilled from 15,000 ISMCTS(1000) hands (184k decisions, ~75 min of generation on 4 cores). Seats rotate in all tournaments.
+`models/doughnut.json`: features v2, 250k self-play hands, then distilled with the policy + value loss (tau 0.1, 6 epochs) from 15,000 ISMCTS(1000) hands (184k decisions, ~60 min of generation on 4 cores). Seats rotate in all tournaments.
 
-Against ISMCTS (four players with two heuristic bots, 200 games):
+**Heads-up vs ISMCTS (1500 iterations), 300 games:** dmc 54.5%, ismcts 45.5%. dmc takes 0.2 ms per move, ismcts 29 ms.
 
-| Bot | Win % (fair 25%) | ms / move |
+**Four players with two heuristic bots, 200 games:** ismcts 41.8%, dmc 36.0% (fair share 25%). This setup barely separates the strong bots; before any distillation it was ismcts 47.9%, dmc 31.3%.
+
+**Policy + value loss vs value-only loss** (same features, data and starting model; 1,500 games each):
+
+| Table | value loss | policy + value loss |
 |---|---|---|
-| ismcts (1500 iterations) | 41.5% | ~50 (under load) |
-| dmc distilled | 35.8% | 0.2 |
-| (before distillation: dmc 31.3% vs ismcts 47.9%) | | |
+| 2 players | 39.9% | **60.1%** |
+| 4 players (+2 heuristic) | 33.5% | **41.6%** |
+| 6 players (+4 heuristic) | 23.1% | **32.6%** |
 
-Distilled vs self-play-only model (1,500 games each): 55.0% vs 45.0% heads-up; +1.9 points with 4 players; +3.5 points with 6 players.
+**Matching ISMCTS** on 1,000 held-out hands. *Agree* = picks the search's top move; *regret* = search value given up (lower is better). The noise floor is ISMCTS(1000) re-run on the same positions.
 
-Where the gain came from (regret vs ISMCTS on 1,000 held-out hands; lower is better):
+| Decision | self-play only | value loss | **policy loss** | noise floor |
+|---|---|---|---|---|
+| All | 63.5% / 0.0232 | 66.0% / 0.0192 | **78.6% / 0.0083** | 80.9% / 0.0080 |
+| Play or fold | 84.6% / 0.0218 | 89.8% / 0.0109 | **95.2% / 0.0038** | 95.7% / 0.0031 |
+| Dealer pick up or fold | 56.3% / 0.0340 | 57.4% / 0.0220 | **72.6% / 0.0067** | 68.1% / 0.0106 |
+| Card play | 57.2% / 0.0228 | 58.7% / 0.0220 | **73.6% / 0.0100** | 76.7% / 0.0096 |
 
-| Decision | Self-play | Distilled |
-|---|---|---|
-| Play or fold | 0.0175 | 0.0108 |
-| Dealer pick up or fold | 0.0320 | 0.0175 |
-| Dealer exchange (10/A) | 0.0193 | 0.0127 |
-| Card play | 0.0211 | 0.0214 |
+The network now matches ISMCTS(1000) about as closely as this measure can tell. To get stronger, it needs a stronger teacher: more search iterations, or search that uses the network itself.
 
-Bidding improved a lot; card play did not. A larger network (512-256) and training from scratch were no better, so the card-play gap is most likely what the features describe rather than model size.
+What didn't help: a larger network (512-256), and the v2 card-play features (who still has to act, trumps outstanding, safe/wasted winners). With the value loss those features changed nothing; they're kept because the policy-loss model uses them, but they weren't tested separately with it.

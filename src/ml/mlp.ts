@@ -111,18 +111,29 @@ export class Mlp {
     return a[0];
   }
 
-  /** Gradients of mean squared error over a batch. */
-  gradients(xs: Float32Array[], ys: number[]): { gW: Float32Array[]; gb: Float32Array[]; loss: number } {
+  /**
+   * Gradients for any loss on the batch outputs. `lossGrad` gets the
+   * predictions and returns the loss and dLoss/dPrediction for each.
+   */
+  gradientsFor(
+    xs: Float32Array[],
+    lossGrad: (yhat: number[]) => { loss: number; dy: number[] },
+  ): { gW: Float32Array[]; gb: Float32Array[]; loss: number } {
     const L = this.W.length;
     const gW = this.W.map((w) => new Float32Array(w.length));
     const gb = this.b.map((b) => new Float32Array(b.length));
-    let loss = 0;
-    const B = xs.length;
-    for (let n = 0; n < B; n++) {
+    const allActs: Float32Array[][] = [];
+    const yhat = xs.map((x) => {
       const acts: Float32Array[] = [];
-      const err = this.predict(xs[n], acts) - ys[n];
-      loss += err * err;
-      let delta = new Float32Array([(2 * err) / B]);
+      const y = this.predict(x, acts);
+      allActs.push(acts);
+      return y;
+    });
+    const { loss, dy } = lossGrad(yhat);
+    for (let n = 0; n < xs.length; n++) {
+      if (dy[n] === 0) continue;
+      const acts = allActs[n];
+      let delta = new Float32Array([dy[n]]);
       for (let l = L - 1; l >= 0; l--) {
         const a = acts[l];
         const out = this.sizes[l + 1];
@@ -145,12 +156,33 @@ export class Mlp {
         if (prev) delta = prev;
       }
     }
-    return { gW, gb, loss: loss / B };
+    return { gW, gb, loss };
+  }
+
+  /** Gradients of mean squared error over a batch. */
+  gradients(xs: Float32Array[], ys: number[]): { gW: Float32Array[]; gb: Float32Array[]; loss: number } {
+    const B = xs.length;
+    return this.gradientsFor(xs, (yhat) => ({
+      loss: yhat.reduce((a, y, n) => a + (y - ys[n]) ** 2, 0) / B,
+      dy: yhat.map((y, n) => (2 * (y - ys[n])) / B),
+    }));
   }
 
   /** One Adam step on mean squared error. Returns the batch loss. */
-  trainBatch(xs: Float32Array[], ys: number[], lr = 1e-3, beta1 = 0.9, beta2 = 0.999, eps = 1e-8): number {
+  trainBatch(xs: Float32Array[], ys: number[], lr = 1e-3): number {
     const { gW, gb, loss } = this.gradients(xs, ys);
+    this.adam(gW, gb, lr);
+    return loss;
+  }
+
+  /** One Adam step on a custom loss (see gradientsFor). Returns the loss. */
+  trainWith(xs: Float32Array[], lossGrad: (yhat: number[]) => { loss: number; dy: number[] }, lr = 1e-3): number {
+    const { gW, gb, loss } = this.gradientsFor(xs, lossGrad);
+    this.adam(gW, gb, lr);
+    return loss;
+  }
+
+  private adam(gW: Float32Array[], gb: Float32Array[], lr: number, beta1 = 0.9, beta2 = 0.999, eps = 1e-8): void {
     const params = [...this.W, ...this.b];
     const grads = [...gW, ...gb];
     if (!this.m.length) {
@@ -171,7 +203,6 @@ export class Mlp {
         p[i] -= (lr * (m[i] / c1)) / (Math.sqrt(v[i] / c2) + eps);
       }
     }
-    return loss;
   }
 
   copyWeightsFrom(other: Mlp): void {
