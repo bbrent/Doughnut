@@ -17,6 +17,7 @@ import {
   type Rng,
 } from '../engine';
 import { BOT_NAMES, pickBotNames } from './bot-names';
+import { isBotLevel } from './bots';
 import { toWire, type BotLevel, type GameRecord, type SeatView, type TableSettings, type TableView } from './protocol';
 
 export interface Clock {
@@ -105,6 +106,7 @@ export class Table {
     if (!(seats >= config.players.min && seats <= config.players.max)) {
       throw new TableError(`${config.name} needs ${config.players.min}-${config.players.max} seats`);
     }
+    if (!isBotLevel(settings.botLevel)) throw new TableError('Unknown bot level');
     this.settings = { ...settings, seats };
     this.clock = deps.clock ?? realClock;
     this.timing = { ...DEFAULT_TIMING, ...deps.timing };
@@ -153,6 +155,15 @@ export class Table {
     if (this.status === 'playing' && this.state?.toAct === bot) this.schedule(); // their turn now, with a turn timer
     this.changed();
     return bot;
+  }
+
+  /** Host only: change the bots' level before the game starts, or before a rematch. */
+  setBotLevel(userId: string, level: BotLevel): void {
+    if (this.seatOf(userId) !== this.hostSeat) throw new TableError('Only the host can change the bots');
+    if (this.status === 'playing') throw new TableError('Change the bots before the game or a rematch');
+    if (!isBotLevel(level)) throw new TableError('Unknown bot level');
+    (this.settings as { botLevel: BotLevel }).botLevel = level;
+    this.changed();
   }
 
   /** Whether someone else could join now: an open seat, or a bot seat to take over. */
@@ -205,7 +216,7 @@ export class Table {
     if (this.seatOf(userId) !== this.hostSeat) throw new TableError('Only the host can start');
     if (this.status === 'playing') throw new TableError('Already playing');
     const config = MODES[this.settings.mode];
-    // Bots keep their names for a rematch; open seats, and bots that took over
+    // Bots keep their names for a rematch (at the current level); open seats, and bots that took over
     // for someone who left, get a fresh bot name.
     const keeps = (s: Seat) => s.kind === 'bot' && BOT_NAMES.includes(s.name);
     const taken = this.seats.flatMap((s) => (s.kind === 'human' ? [s.user.name] : keeps(s) ? [(s as { name: string }).name] : []));

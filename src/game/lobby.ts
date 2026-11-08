@@ -9,7 +9,8 @@
  * session when the same account logs in on several devices.
  */
 import { MODES, mulberry32, randInt, type Rng } from '../engine';
-import type { AccountView, ClientMessage, FriendView, FriendsView, GameRecord, Profile, ServerMessage, TableSettings } from './protocol';
+import type { AccountView, BotLevel, ClientMessage, FriendView, FriendsView, GameRecord, Profile, ServerMessage, TableSettings } from './protocol';
+import { isBotLevel } from './bots';
 import { Table, TableError, type TableDeps, type User } from './table';
 
 export interface Client {
@@ -105,7 +106,7 @@ export class Lobby {
   private lastInvite = new Map<string, number>();
   private tables = new Map<string, Table>();
   private members = new Map<Table, Set<Session>>();
-  private queue: { session: Session; mode: string; since: number }[] = [];
+  private queue: { session: Session; mode: string; botLevel: BotLevel; since: number }[] = [];
   private rng: Rng;
   private guests = 0;
   readonly opts: LobbyOptions;
@@ -214,7 +215,10 @@ export class Lobby {
           break;
         case 'quick':
           this.requireName(s);
-          this.enqueue(s, msg.mode);
+          this.enqueue(s, msg.mode, isBotLevel(msg.botLevel) ? msg.botLevel : 'medium');
+          break;
+        case 'settings':
+          this.requireTable(s).setBotLevel(s.user.id, msg.botLevel);
           break;
         case 'start':
           this.requireTable(s).start(s.user.id);
@@ -502,10 +506,10 @@ export class Lobby {
 
   // ---- quick match -------------------------------------------------------
 
-  private enqueue(s: Session, mode: string): void {
+  private enqueue(s: Session, mode: string, botLevel: BotLevel): void {
     if (!MODES[mode]) throw new TableError(`Unknown mode ${mode}`);
     this.leave(s, true);
-    if (!this.queue.some((q) => q.session === s)) this.queue.push({ session: s, mode, since: this.now() });
+    if (!this.queue.some((q) => q.session === s)) this.queue.push({ session: s, mode, botLevel, since: this.now() });
     this.tick();
     const pos = this.queue.findIndex((q) => q.session === s);
     if (pos >= 0) this.send(s, { t: 'queued', position: pos + 1 });
@@ -528,7 +532,8 @@ export class Lobby {
         const group = waiting.slice(0, this.opts.quickSeats);
         this.queue = this.queue.filter((q) => !group.includes(q));
         const sessions = group.map((q) => q.session);
-        const t = this.makeTable(sessions[0].user, { mode, seats: this.opts.quickSeats, botLevel: 'hard' });
+        // Bots (if any are needed) play at the level chosen by whoever waited longest.
+        const t = this.makeTable(sessions[0].user, { mode, seats: this.opts.quickSeats, botLevel: group[0].botLevel });
         for (const s of sessions) {
           if (s !== sessions[0]) t.join(s.user);
           this.seat(s, t);

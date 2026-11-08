@@ -253,3 +253,51 @@ describe('bot names', () => {
     expect(new Set(again).size).toBe(4);
   });
 });
+
+describe('bot levels', () => {
+  it('levels map to the trained model at decreasing temperatures; unknown levels are rejected', async () => {
+    const { BOT_LEVELS, BOT_LEVEL_IDS, isBotLevel } = await import('../src/game/bots');
+    expect(BOT_LEVEL_IDS).toEqual(['beginner', 'easy', 'medium', 'hard']);
+    const temps = BOT_LEVEL_IDS.map((l) => BOT_LEVELS[l].temperature);
+    expect([...temps].sort((a, b) => b - a)).toEqual(temps);
+    expect(BOT_LEVELS.hard.temperature).toBe(0);
+    expect(isBotLevel('expert')).toBe(false);
+    expect(() => new Table('X', alice, { mode: 'doughnut', seats: 3, botLevel: 'expert' as never }, { makeBot })).toThrow('Unknown bot level');
+  });
+
+  it('host changes the level before the start or a rematch; rematch bots use it', () => {
+    const clock = new FakeClock();
+    const made: string[] = [];
+    const t = new Table('X', alice, { mode: 'doughnut-20', seats: 3, botLevel: 'easy' }, {
+      makeBot: (l) => (made.push(l), heuristicAgent()),
+      clock,
+      rng: mulberry32(1),
+    });
+    t.join(bob);
+    expect(() => t.setBotLevel('b', 'hard')).toThrow('Only the host');
+    t.setBotLevel('a', 'beginner');
+    expect(t.view('b').settings.botLevel).toBe('beginner');
+    t.start('a');
+    expect(made.every((l) => l === 'beginner')).toBe(true);
+    expect(() => t.setBotLevel('a', 'hard')).toThrow('before the game or a rematch');
+    clock.runAll();
+    made.length = 0;
+    t.setBotLevel('a', 'hard');
+    t.start('a');
+    expect(made.length).toBeGreaterThan(0);
+    expect(made.every((l) => l === 'hard')).toBe(true);
+  });
+
+  it('quick match bots use the level picked by whoever waited longest', async () => {
+    const clock = new FakeClock();
+    const made: string[] = [];
+    const lobby = new Lobby({ makeBot: (l) => (made.push(l), heuristicAgent()), clock, rng: mulberry32(9) }, { quickSeats: 3, quickWaitMs: 5_000 });
+    const r = new Recorder();
+    await lobby.handle(r, null, { t: 'hello', token: 'tokenAAAAAAAAAAAAAAAA', name: 'Alice' });
+    await lobby.handle(r, 'tokenAAAAAAAAAAAAAAAA', { t: 'quick', mode: 'doughnut', botLevel: 'beginner' });
+    clock.advance(5_000);
+    lobby.tick();
+    expect(r.table!.settings.botLevel).toBe('beginner');
+    expect(made.every((l) => l === 'beginner')).toBe(true);
+  });
+});

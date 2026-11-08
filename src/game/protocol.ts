@@ -1,7 +1,7 @@
 /** Wire protocol between client and server (JSON over WebSocket). */
 import type { HandResult, Move, Observation } from '../engine';
 
-export type BotLevel = 'easy' | 'medium' | 'hard';
+export type BotLevel = 'beginner' | 'easy' | 'medium' | 'hard';
 
 export interface TableSettings {
   mode: string;
@@ -119,7 +119,10 @@ export type ClientMessage =
   | { t: 'inviteDecline'; from: string }
   | { t: 'create'; settings: TableSettings }
   | { t: 'join'; code: string }
-  | { t: 'quick'; mode: string }
+  /** Quick match; `botLevel` is used for any seats bots have to fill. */
+  | { t: 'quick'; mode: string; botLevel?: BotLevel }
+  /** Host only, before the game starts or before a rematch. */
+  | { t: 'settings'; botLevel: BotLevel }
   | { t: 'start' }
   | { t: 'move'; move: Move }
   | { t: 'leave' };

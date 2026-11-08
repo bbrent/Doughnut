@@ -2,6 +2,7 @@
 import { MODES, RANKS, SUIT_SYMBOLS, rankOf, suitOf, type Card, type Move } from '../engine';
 import type { AccountView, BotLevel, ClientMessage, FriendView, FriendsView, Invite, ServerMessage, TableSettings, TableView, WireObservation } from '../game/protocol';
 import { localConn, onlineConn, type Conn, type Status } from './conn';
+import { BOT_LEVELS, BOT_LEVEL_IDS } from '../game/bots';
 import { robotHtml } from './icons';
 import { chooseLayout, tableSvg } from './table-svg';
 
@@ -220,8 +221,14 @@ function selectOptions(values: (string | number)[], selected: string | number, l
 
 const modeOptions = (sel: string) => selectOptions(Object.keys(MODES), sel, (id) => MODES[id as string].name);
 const seatOptions = (sel: number) => selectOptions([2, 3, 4, 5, 6], sel, (n) => `${n} players`);
-const levelOptions = (sel: string) =>
-  selectOptions(['easy', 'medium', 'hard'], sel, (l) => ({ easy: 'Easy bots', medium: 'Medium bots', hard: 'Hard bots' })[l as BotLevel]);
+const levelOptions = (sel: string) => selectOptions(BOT_LEVEL_IDS, sel, (l) => `${BOT_LEVELS[l as BotLevel].label} bots`);
+/** The bot level last picked anywhere, remembered for next time. */
+const savedLevel = (): BotLevel => {
+  const l = store('doughnut-level');
+  return l && l in BOT_LEVELS ? (l as BotLevel) : 'medium';
+};
+const levelSelect = (id: string) =>
+  `<select id="${id}" data-level-select title="${esc(BOT_LEVELS[savedLevel()].blurb)}">${levelOptions(savedLevel())}</select>`;
 
 // ---- screens -----------------------------------------------------------------
 
@@ -368,8 +375,11 @@ function homeHtml(): string {
   <div class="grid">
     <div class="panel stack">
       <h2>Play online</h2>
-      <button class="primary" data-action="quick">Quick match</button>
-      <div class="small muted">Plays with whoever is waiting; bots fill empty seats after 10 seconds.</div>
+      <div class="row" style="align-items:center">
+        <button class="primary" data-action="quick" style="flex:0 0 auto">Quick match</button>
+        ${levelSelect('q-level')}
+      </div>
+      <div class="small muted">Plays with whoever is waiting; bots at your chosen level fill empty seats after 10 seconds.</div>
       <hr style="border:none;border-top:1px solid var(--line)">
       <label>Join a table</label>
       <div class="row">
@@ -383,7 +393,7 @@ function homeHtml(): string {
         <div><label for="o-mode">Mode</label><select id="o-mode">${modeOptions('doughnut')}</select></div>
         <div><label for="o-seats">Seats</label><select id="o-seats">${seatOptions(4)}</select></div>
       </div>
-      <label for="o-level">Empty seats</label><select id="o-level">${levelOptions('hard')}</select>
+      <label for="o-level">Empty seats</label>${levelSelect('o-level')}
       <button class="primary" data-action="create">Create table</button>
       <div class="small muted">You get a code and link to share. Empty seats become bots when you start.</div>
     </div>
@@ -391,7 +401,7 @@ function homeHtml(): string {
       <h2>Practice</h2>
       <div class="row">
         <div><label for="p-seats">Seats</label><select id="p-seats">${seatOptions(4)}</select></div>
-        <div><label for="p-level">Bots</label><select id="p-level">${levelOptions('medium')}</select></div>
+        <div><label for="p-level">Bots</label>${levelSelect('p-level')}</div>
       </div>
       <label for="p-mode">Mode</label><select id="p-mode">${modeOptions('doughnut')}</select>
       <button data-action="practice">Play against bots</button>
@@ -518,12 +528,21 @@ function invitesHtml(): string {
     .join('')}</div>`;
 }
 
+/** The bots' level: the host can change it before the start or a rematch. */
+function botLevelLine(t: TableView): string {
+  const lvl = BOT_LEVELS[t.settings.botLevel];
+  if (t.you !== t.hostSeat || st.practice) return `<div class="small muted">Bots: ${lvl.label} (${lvl.blurb.toLowerCase()})</div>`;
+  return `<div class="row" style="align-items:center;justify-content:center"><label for="table-level" style="margin:0;flex:0 0 auto">Bots</label>
+    <select id="table-level" style="flex:0 1 200px">${levelOptions(t.settings.botLevel)}</select></div>
+    <div class="small muted">${esc(lvl.blurb)}</div>`;
+}
+
 function tableHtml(t: TableView): string {
   const o = t.obs;
   const mode = MODES[t.settings.mode];
   const conn = st.practice ? 'practice' : st.status;
   const header = `<div class="bar">
-      <div><strong>${esc(mode.name)}</strong> <span class="muted small">${st.practice ? 'practice' : `table ${t.code}`}${o ? ` · hand ${o.handsPlayed + (o.phase === 'handOver' || o.phase === 'gameOver' ? 0 : 1)}` : ''}</span></div>
+      <div><strong>${esc(mode.name)}</strong> <span class="muted small">${st.practice ? 'practice' : `table ${t.code}`}${o ? ` · hand ${o.handsPlayed + (o.phase === 'handOver' || o.phase === 'gameOver' ? 0 : 1)}` : ''}${t.seats.some((x) => x.kind === 'bot') || t.status === 'lobby' ? ` · ${BOT_LEVELS[t.settings.botLevel].label.toLowerCase()} bots` : ''}</span></div>
       <div><span class="conn ${conn === 'offline' ? 'offline' : ''}">${conn === 'offline' ? 'reconnecting…' : conn}</span>
         ${st.account && !st.practice ? `<button data-action="invite-toggle" aria-expanded="${st.invitePanel}">Invite friends</button>` : ''}
         <button data-action="leave">Leave</button></div>
@@ -537,7 +556,8 @@ function tableHtml(t: TableView): string {
         <h2>Waiting for players</h2>
         <div>Share code <span class="code">${t.code}</span> or this link:</div>
         <div class="row"><input readonly value="${esc(link)}" id="invite" /><button data-action="copy">Copy</button></div>
-        ${isHost ? `<div><button class="primary" data-action="start">Start game</button></div><div class="small muted">Open seats become ${t.settings.botLevel} bots.</div>` : '<div class="muted">The host will start the game.</div>'}
+        ${botLevelLine(t)}
+        ${isHost ? '<div><button class="primary" data-action="start">Start game</button></div>' : '<div class="muted">The host will start the game.</div>'}
       </div></div>`;
     return `${header}<div class="table-wrap">${svg}${overlay}</div>`;
   }
@@ -555,7 +575,7 @@ function tableHtml(t: TableView): string {
           ? '<div class="small muted" style="margin-top:8px">Playing as a guest, so this game wasn\'t saved. Sign up on the home screen to keep your record.</div>'
           : '';
     overlay = `<div class="overlay"><div class="overlay-card"><h2>${winners} win${t.winners.length === 1 && t.winners[0] !== t.you ? 's' : ''}!</h2>${resultsHtml(t, o)}${ratingLine}</div></div>`;
-    bottom = `<div class="prompt"><div class="actions">${t.you === t.hostSeat ? '<button class="primary" data-action="start">Play again</button>' : '<span class="muted">The host can start a rematch.</span>'}<button data-action="leave">Leave</button></div></div>`;
+    bottom = `<div class="prompt">${t.seats.some((x) => x.kind === 'bot') ? botLevelLine(t) : ''}<div class="actions">${t.you === t.hostSeat ? '<button class="primary" data-action="start">Play again</button>' : '<span class="muted">The host can start a rematch.</span>'}<button data-action="leave">Leave</button></div></div>`;
   } else if (o.phase === 'handOver') {
     overlay = `<div class="overlay"><div class="overlay-card"><h2>Hand over</h2>${resultsHtml(t, o)}<div class="small muted" style="margin-top:6px">Next hand starting…</div></div></div>`;
     bottom = '';
@@ -721,7 +741,7 @@ app.addEventListener('click', (e) => {
       return;
     case 'quick':
       if (needName()) return;
-      online().send({ t: 'quick', mode: 'doughnut' });
+      online().send({ t: 'quick', mode: 'doughnut', botLevel: val('q-level') as BotLevel });
       break;
     case 'join': {
       if (needName()) return;
@@ -775,6 +795,17 @@ app.addEventListener('click', (e) => {
     case 'card':
       move({ kind: 'card', card });
       break;
+  }
+});
+
+app.addEventListener('change', (e) => {
+  const t = e.target as HTMLSelectElement;
+  if (t.id === 'table-level') {
+    store('doughnut-level', t.value);
+    send({ t: 'settings', botLevel: t.value as BotLevel });
+  } else if (t.dataset.levelSelect !== undefined) {
+    store('doughnut-level', t.value);
+    render(); // all level pickers follow the last choice
   }
 });
 

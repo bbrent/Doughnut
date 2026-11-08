@@ -46,14 +46,27 @@ export function argmax(xs: number[]): number {
   return best;
 }
 
-export function dmcAgent(net: Mlp, opts: { epsilon?: number; name?: string } = {}): Agent {
+/**
+ * Options: `epsilon` plays a uniformly random move that often (training
+ * exploration). `temperature` > 0 picks moves with probability
+ * softmax(Q / temperature): mostly the best, sometimes one rated nearly as
+ * well, which makes believable mistakes for easier bots.
+ */
+export function dmcAgent(net: Mlp, opts: { epsilon?: number; temperature?: number; name?: string } = {}): Agent {
   const epsilon = opts.epsilon ?? 0;
+  const temperature = opts.temperature ?? 0;
   return {
     name: opts.name ?? 'dmc',
     chooseMove(obs: Observation, rng: Rng): Move {
       if (obs.legalMoves.length === 1) return obs.legalMoves[0];
       if (epsilon > 0 && rng() < epsilon) return pick(obs.legalMoves, rng);
-      return obs.legalMoves[argmax(evaluateMoves(net, obs).q)];
+      const q = evaluateMoves(net, obs).q;
+      if (temperature <= 0) return obs.legalMoves[argmax(q)];
+      const max = Math.max(...q);
+      const w = q.map((x) => Math.exp((x - max) / temperature));
+      let r = rng() * w.reduce((a, b) => a + b, 0);
+      for (let i = 0; i < w.length; i++) if ((r -= w[i]) <= 0) return obs.legalMoves[i];
+      return obs.legalMoves[argmax(q)];
     },
   };
 }

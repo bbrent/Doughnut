@@ -64,6 +64,19 @@ Run with `node dist/server.cjs` (or `npm start`) from the project folder. Settin
   - **serve the site over HTTPS**; the forms warn when it isn't
 - **Browser sessions:** each browser has a random token. Logging in links its SHA-256 hash to the account, so a reload keeps you logged in.
 
+### Bot difficulty
+
+Four levels, chosen for quick match, private tables (the host can change it in the lobby or before a rematch) and practice. The last choice is remembered. All levels use the trained model. Weaker levels pick each move with probability softmax(Q / temperature): usually the move the model rates best, sometimes one it rates nearly as well. That gives believable mistakes (a near-best card, a borderline fold) instead of random ones. Defined in `src/game/bots.ts`.
+
+| Level | Temperature | Win % (4-player games among the levels plus the rule-based bot, 2,000 games) |
+|---|---|---|
+| Hard | 0 (always the best move) | 49.0% |
+| Medium | 0.06 | 34.3% |
+| Easy | 0.15 | 17.1% (the old rule-based bot: 17.4%) |
+| Beginner | 0.30 | 7.2% |
+
+Re-measure with `npx tsx scripts/levels.ts 2000` after retraining (`--explore` tries other temperatures). Without a model file, every level falls back to the rule-based bot.
+
 ### Friends
 
 Signed-up players can add friends by nickname. The other player accepts or declines, so nobody sees your status without agreeing to it. The home screen lists friends with live status: offline, online, looking for a quick match, waiting at a table (with free seats), or playing. A **Join** button appears when there's room:
