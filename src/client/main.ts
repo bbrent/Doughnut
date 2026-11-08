@@ -137,7 +137,7 @@ function selectOptions(values: (string | number)[], selected: string | number, l
 }
 
 const modeOptions = (sel: string) => selectOptions(Object.keys(MODES), sel, (id) => MODES[id as string].name);
-const seatOptions = (sel: number) => selectOptions([2, 3, 4, 5, 6, 7, 8, 9, 10], sel, (n) => `${n} players`);
+const seatOptions = (sel: number) => selectOptions([2, 3, 4, 5, 6], sel, (n) => `${n} players`);
 const levelOptions = (sel: string) =>
   selectOptions(['easy', 'medium', 'hard'], sel, (l) => ({ easy: 'Easy bots', medium: 'Medium bots', hard: 'Hard bots' })[l as BotLevel]);
 

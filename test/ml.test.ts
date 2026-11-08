@@ -68,7 +68,7 @@ describe('features', () => {
     const rng = mulberry32(4);
     const out: GameState[] = [];
     for (let i = 0; out.length < count; i++) {
-      let s = newGame(DOUGHNUT, 2 + (i % 9), i);
+      let s = newGame(DOUGHNUT, 2 + (i % 5), i);
       const steps = Math.floor(rng() * 30);
       for (let k = 0; k < steps && legalMoves(s).length; k++) s = applyMove(s, pick(legalMoves(s), rng));
       if (s.toAct >= 0) out.push(s);

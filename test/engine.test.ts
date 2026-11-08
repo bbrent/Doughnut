@@ -47,7 +47,7 @@ function playState(hands: string[], turnUp: string, playing = [true, true, true,
 
 describe('deal', () => {
   it('deals 5 cards each plus a turn-up, no duplicates', () => {
-    for (const n of [2, 4, 10]) {
+    for (const n of [2, 4, 6]) {
       const s = newGame(DOUGHNUT, n, 7);
       expect(s.hands.every((h) => h.length === 5)).toBe(true);
       const all = [...s.hands.flat(), s.turnUp, ...s.stock];
@@ -59,7 +59,7 @@ describe('deal', () => {
 
   it('rejects bad player counts', () => {
     expect(() => newGame(DOUGHNUT, 1, 1)).toThrow();
-    expect(() => newGame(DOUGHNUT, 11, 1)).toThrow();
+    expect(() => newGame(DOUGHNUT, 7, 1)).toThrow();
   });
 });
 
@@ -199,9 +199,9 @@ describe('scoring', () => {
 });
 
 describe('random games', () => {
-  it('play to completion with consistent card counts, 2-10 players', () => {
+  it('play to completion with consistent card counts, 2-6 players', () => {
     const rng = mulberry32(42);
-    for (let n = 2; n <= 10; n++) {
+    for (let n = 2; n <= 6; n++) {
       for (let g = 0; g < 5; g++) {
         let s = newGame(DOUGHNUT_20_HANDS, n, n * 100 + g);
         let hands = 0;
@@ -222,7 +222,7 @@ describe('determinize', () => {
   it('keeps own hand and public info, respects voids, never duplicates cards', () => {
     const rng = mulberry32(9);
     for (let seed = 0; seed < 200; seed++) {
-      let s = newGame(DOUGHNUT, 2 + (seed % 9), seed);
+      let s = newGame(DOUGHNUT, 2 + (seed % 5), seed);
       const steps = Math.floor(rng() * 25);
       for (let i = 0; i < steps && (s.phase === 'play' || s.phase === 'declare' || s.phase === 'exchange'); i++) {
         s = applyMove(s, pick(legalMoves(s), rng));

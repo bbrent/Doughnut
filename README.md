@@ -71,7 +71,7 @@ Bots: `random`, `heuristic`, `ismcts`, `ismcts:<iterations>` (default 1500), `dm
 
 ## Doughnut rules (as implemented)
 
-- 52 cards, A high. 2–10 players, 5 cards each; the next card is turned up and its suit is trump.
+- 52 cards, A high. 2–6 players, 5 cards each; the next card is turned up and its suit is trump.
 - **Turn-up is a 10 or Ace:** everyone plays. The dealer may swap one card for the turn-up.
 - **Otherwise:** clockwise from the dealer's left, each player plays or folds. The dealer decides last: fold, or pick up the turn-up (discarding one card) and play.
 - Dealer's left leads (the next active player if they folded). Must follow suit; if void, may play any card, including trump. Highest trump wins, else highest card of the led suit. Trick winner leads next.
@@ -102,7 +102,7 @@ A mode is a `GameConfig` object in `modes.ts`. Most variants are a few fields, e
 
 `npm run train` runs self-play: worker threads play hands with the latest weights, and the main thread trains on the results. Workers pause when the learner falls behind, so every sample gets trained on.
 
-- **Bounded episodes.** Each training episode is one hand, starting from a randomly sampled scoreboard (scores 1–28, or everyone at 20 for 30% of hands) and a random player count from 2–10. Episodes are short no matter how many players are seated, and the model still sees end-game positions (close to zero, fold penalty active).
+- **Bounded episodes.** Each training episode is one hand, starting from a randomly sampled scoreboard (scores 1–28, or everyone at 20 for 30% of hands) and a random player count from 2–6. Episodes are short no matter how many players are seated, and the model still sees end-game positions (close to zero, fold penalty active).
 - **Reward** is the same as ISMCTS uses: minus the hand's score change divided by 5, plus 1 for a win if the hand ends the game.
 - **Opponents:** 25% of seats are played by the heuristic bot, the rest by the model being trained (with random exploration moves, decreasing over training).
 - **Encoding** (`features.ts`) describes cards by role: suits are reordered so trump is always first, so one model generalises across suits. The mode's settings are also inputs, so related variants can share a model. Changing the layout means bumping `FEATURE_VERSION` and retraining.

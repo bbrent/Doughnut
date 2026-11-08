@@ -68,7 +68,7 @@ Each queued player gives a mode (`doughnut`, `doughnut-20`) and acceptable table
 Tables are always marked "N humans + M bots" so players know. Ranked queues could require at least 2 humans.
 
 ### Rating
-Doughnut is free-for-all with 2–10 players, so plain Elo doesn't fit. Use a multiplayer Bayesian rating such as **OpenSkill** (Weng-Lin, an open TrueSkill-style system with an npm package), ranked by final placement. Bots get fixed ratings measured by bot-vs-bot tournaments (we already have the harness), which also anchors the scale.
+Doughnut is free-for-all with 2–6 players, so plain Elo doesn't fit. Use a multiplayer Bayesian rating such as **OpenSkill** (Weng-Lin, an open TrueSkill-style system with an npm package), ranked by final placement. Bots get fixed ratings measured by bot-vs-bot tournaments (we already have the harness), which also anchors the scale.
 
 ### Turn timer, disconnects and long games
 - Each decision has a deadline, e.g. 20 s to play a card and 30 s to play or fold. When it runs out, the server makes the move with the model.

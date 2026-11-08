@@ -38,7 +38,7 @@ export interface TrainOptions {
 
 export const DEFAULT_TRAIN: Omit<TrainOptions, 'config'> = {
   hands: 200_000,
-  playerWeights: { 2: 1, 3: 2, 4: 3, 5: 3, 6: 2, 7: 1, 8: 1, 9: 0.5, 10: 0.5 },
+  playerWeights: { 2: 1, 3: 2, 4: 3, 5: 3, 6: 2 },
   batchSize: 256,
   lr: 5e-4,
   bufferSize: 200_000,

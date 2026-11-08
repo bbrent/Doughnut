@@ -9,7 +9,7 @@ export const DOUGHNUT: GameConfig = {
   id: 'doughnut',
   name: 'Doughnut',
   deck: FULL_DECK,
-  players: { min: 2, max: 10 },
+  players: { min: 2, max: 6 },
   handSize: 5,
   trump: { source: 'turnUp', forcedPlayRanks: ['10', 'A'], dealerExchangeOnForced: true },
   participation: { mode: 'declare', dealerPlaysByPickup: true },

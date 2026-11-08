@@ -73,7 +73,12 @@ export function playedCards(o: Observation): Card[] {
 export function determinize(o: Observation, rng: Rng, maxAttempts = 50): GameState {
   const rules = rulesFor(o.config);
   const played = new Set(playedCards(o));
-  const turnUpWithDealer = o.dealerTookTurnUp && o.dealer !== o.player && !played.has(o.turnUp);
+  const turnUpLive = o.dealerTookTurnUp && o.dealer !== o.player && !played.has(o.turnUp);
+  // The dealer may have discarded the turn-up itself. We know they did if they
+  // have no cards left, or have shown they're void in its suit.
+  const turnUpDiscarded =
+    turnUpLive && (o.handSizes[o.dealer] === 0 || o.voids[o.dealer][rules.effectiveSuit(o.turnUp, o.trump)]);
+  const turnUpWithDealer = turnUpLive && !turnUpDiscarded;
 
   const known = new Set<Card>([...o.hand, ...played, o.turnUp]);
   if (o.ownDiscard !== null) known.add(o.ownDiscard);
@@ -117,7 +122,8 @@ export function determinize(o: Observation, rng: Rng, maxAttempts = 50): GameSta
   if (turnUpWithDealer) hands[o.dealer].push(o.turnUp);
 
   let discard = o.ownDiscard;
-  if (o.dealerTookTurnUp && o.dealer !== o.player) {
+  if (turnUpDiscarded) discard = o.turnUp;
+  else if (o.dealerTookTurnUp && o.dealer !== o.player) {
     discard = rest.splice(randInt(rng, rest.length), 1)[0] ?? null;
   }
   return {

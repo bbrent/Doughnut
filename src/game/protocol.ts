@@ -5,7 +5,7 @@ export type BotLevel = 'easy' | 'medium' | 'hard';
 
 export interface TableSettings {
   mode: string;
-  /** Total seats, 2-10. Empty seats are filled with bots when the game starts. */
+  /** Total seats, 2-6. Empty seats are filled with bots when the game starts. */
   seats: number;
   botLevel: BotLevel;
 }
