@@ -16,7 +16,7 @@ import {
   type Move,
   type Rng,
 } from '../engine';
-import { toWire, type BotLevel, type SeatView, type TableSettings, type TableView } from './protocol';
+import { toWire, type BotLevel, type GameRecord, type SeatView, type TableSettings, type TableView } from './protocol';
 
 export interface Clock {
   now(): number;
@@ -67,6 +67,8 @@ export interface TableDeps {
   timing?: Partial<Timing>;
   rng?: Rng;
   onChange?: (t: Table) => void;
+  /** Called once when a game finishes. */
+  onGameOver?: (t: Table, record: GameRecord) => void;
 }
 
 export class TableError extends Error {}
@@ -84,6 +86,9 @@ export class Table {
   private readonly timing: Timing;
   private readonly rng: Rng;
   private lastActivity: number;
+  private startedAt = 0;
+  /** Who started in each seat (null = bot), for the game record. */
+  private originalUsers: (User | null)[] = [];
 
   constructor(
     readonly code: string,
@@ -186,6 +191,8 @@ export class Table {
       return this.deps.makeBot(this.settings.botLevel);
     });
     const n = this.seats.length;
+    this.originalUsers = this.seats.map((s) => (s.kind === 'human' ? s.user : null));
+    this.startedAt = this.clock.now();
     this.state = newGame(config, n, Math.floor(this.rng() * 2 ** 32), randInt(this.rng, n));
     this.status = 'playing';
     this.schedule();
@@ -219,6 +226,7 @@ export class Table {
 
     if (s.phase === 'gameOver') {
       this.status = 'over';
+      this.deps.onGameOver?.(this, this.record());
       return;
     }
     if (s.phase === 'handOver') {
@@ -248,6 +256,30 @@ export class Table {
       wait = this.timing.botDelayMs;
     }
     this.timer = this.clock.setTimeout(autoMove, extraDelay + wait);
+  }
+
+  /** Summary of the finished game. */
+  record(): GameRecord {
+    const s = this.state!;
+    return {
+      code: this.code,
+      mode: this.settings.mode,
+      startedAt: this.startedAt,
+      endedAt: this.clock.now(),
+      hands: s.handsPlayed,
+      winners: s.winners.slice(),
+      seats: this.seats.map((seat, i) => {
+        const orig = this.originalUsers[i] ?? null;
+        const stillHere = !!orig && seat.kind === 'human' && seat.user.id === orig.id;
+        return {
+          userId: orig?.id ?? null,
+          name: orig?.name ?? (seat.kind === 'bot' ? seat.name : 'Open seat'),
+          botLevel: orig ? null : this.settings.botLevel,
+          finalScore: s.scores[i],
+          leftEarly: !!orig && !stillHere,
+        };
+      }),
+    };
   }
 
   /** Stop timers (table being discarded). */

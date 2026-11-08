@@ -1,6 +1,6 @@
 # Multiplayer and matchmaking
 
-Status: phase 1 is built (guests, private tables, quick match, bots, turn timers, reconnects, practice). See the README's "Play online / deploy" section. Facebook is no longer planned; the Facebook notes are kept for reference.
+Status: phases 1 and 2 are built (guests, private tables, quick match, bots, turn timers, reconnects, practice, MySQL persistence, OpenSkill ratings, leaderboard). Tables are limited to 2–6 players. See the README's "Play online / deploy" section. Facebook is no longer planned; the Facebook notes are kept for reference.
 
 ## Summary
 

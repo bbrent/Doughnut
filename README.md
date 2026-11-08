@@ -44,6 +44,20 @@ Run with `node dist/server.cjs` (or `npm start`) from the project folder. Settin
 | `APP_ROOT` | current directory | where `dist/` and `models/` live |
 | `PUBLIC_DIR` | `$APP_ROOT/dist/public` | |
 | `MODEL_PATH` | `$APP_ROOT/models/doughnut.json` | without it, bots use the heuristic |
+| `DATABASE_URL` | none | `mysql://user:password@host:3306/dbname` |
+| `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE` | none | alternative to `DATABASE_URL` |
+
+### Database (MySQL)
+
+Optional. With a database configured, the server saves players, finished games and ratings. Without one, or if it can't connect at startup (it logs why), everything still works but nothing is saved.
+
+- **Setup:** create an empty database and a user with rights on it. The server creates its tables on startup (`CREATE TABLE IF NOT EXISTS`), so there's no migration step. Works with MySQL 5.7+/8 and MariaDB 10.3+.
+- **`players`:** one row per browser. The browser's random token acts as the player's password, so only its SHA-256 hash is stored. Also holds name, OpenSkill rating (`mu`, `sigma`), games and wins.
+- **`games`** and **`game_players`:** one row per finished online game, and one per seat: final score, placing, won, left early, rating before and after. Bots are recorded with their level.
+- **Ratings:** OpenSkill (Weng-Lin), placed by final score (ties share a place, players who left finish last). Games with two or more humans are rated; bots don't affect ratings. The displayed rating is `1000 + 40 × (mu − 3σ)`, so a new player starts at 1000 and it rises as the system becomes sure of you.
+- **`GET /api/leaderboard?limit=20`** returns the top rated players. The home page shows it, along with your own rating. After a rated game you see your change.
+
+Tests: `TEST_MYSQL_URL=mysql://user:pass@127.0.0.1:3306/testdb npm test` also runs the MySQL tests (they empty the tables in that database).
 
 To deploy, upload `dist/` and `models/` (no `npm install` needed on the host) and set the start file to `dist/server.cjs`. The server must run as **one long-lived process**: games live in memory, and players stay connected over a WebSocket at `/ws`. Things to check with the host:
 - **WebSockets** must be allowed through their proxy. Shared hosts that run Node behind Phusion Passenger (common with cPanel's "Setup Node.js App") usually support them, but some plans don't.
@@ -52,7 +66,7 @@ To deploy, upload `dist/` and `models/` (no `npm install` needed on the host) an
 
 `GET /health` returns `{ ok, tables, model }`.
 
-What's in it: guests (a name plus a random token kept in the browser, so a reload rejoins the same seat), private tables with a 5-letter code and invite link, quick match (4 seats; bots fill in after 10 s), and offline practice that runs the same table code in the browser. The server is the only authority: each player receives only their own view, and every move is checked by the engine. Bots fill empty seats, play for anyone who misses the 30 s turn timer, and cover disconnected players within 1.5 s until they reconnect. Code: `src/game/` (table, lobby, protocol; no Node dependencies), `src/server/` (HTTP + WebSocket), `src/client/` (plain TypeScript, no framework).
+What's in it: guests (a name plus a random token kept in the browser, so a reload rejoins the same seat), private tables (2–6 seats) with a 5-letter code and invite link, quick match (4 seats; bots fill in after 10 s), ratings and a leaderboard (with MySQL), and offline practice that runs the same table code in the browser. The table is drawn in SVG: a felt oval inside a stitched leather rail, with players seated around it, you always at the bottom, and each card played landing in front of whoever played it. On narrow screens the oval stands upright. The server is the only authority: each player receives only their own view, and every move is checked by the engine. Bots fill empty seats, play for anyone who misses the 30 s turn timer, and cover disconnected players within 1.5 s until they reconnect. Code: `src/game/` (table, lobby, protocol; no Node dependencies), `src/server/` (HTTP + WebSocket), `src/client/` (plain TypeScript, no framework).
 
 ## Commands
 

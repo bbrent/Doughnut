@@ -35,6 +35,33 @@ export interface TableView {
   winners: number[];
 }
 
+export interface Profile {
+  name: string;
+  /** Display rating (1000 = new player), or null when ratings aren't kept. */
+  rating: number | null;
+  games: number;
+  wins: number;
+}
+
+/** A finished game, as recorded. Seats in table order. */
+export interface GameRecord {
+  code: string;
+  mode: string;
+  startedAt: number;
+  endedAt: number;
+  hands: number;
+  winners: number[];
+  seats: {
+    /** The human who started in this seat (null for bots). */
+    userId: string | null;
+    name: string;
+    botLevel: BotLevel | null;
+    finalScore: number;
+    /** A human who left before the end (a bot finished for them). */
+    leftEarly: boolean;
+  }[];
+}
+
 export type ClientMessage =
   | { t: 'hello'; token: string; name: string }
   | { t: 'create'; settings: TableSettings }
@@ -45,7 +72,8 @@ export type ClientMessage =
   | { t: 'leave' };
 
 export type ServerMessage =
-  | { t: 'welcome'; name: string }
+  | { t: 'welcome'; name: string; profile: Profile | null }
+  | { t: 'profile'; profile: Profile; ratingChange: number | null }
   | { t: 'table'; table: TableView }
   | { t: 'left' }
   | { t: 'queued'; position: number }

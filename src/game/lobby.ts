@@ -4,7 +4,7 @@
  * server (src/server) is a thin wrapper around this.
  */
 import { MODES, mulberry32, randInt, type Rng } from '../engine';
-import type { ClientMessage, ServerMessage, TableSettings } from './protocol';
+import type { ClientMessage, GameRecord, Profile, ServerMessage, TableSettings } from './protocol';
 import { Table, TableError, type TableDeps, type User } from './table';
 
 export interface Client {
@@ -16,6 +16,16 @@ interface Session {
   user: User;
   clients: Set<Client>;
   table: Table | null;
+}
+
+/**
+ * Optional persistence (the server's MySQL store). Without it, users are
+ * identified for the life of the process only and nothing is recorded.
+ */
+export interface Accounts {
+  identify(token: string, name: string): Promise<{ id: string; profile: Profile }>;
+  /** Record a finished game; returns updated profiles for the humans in it. */
+  recordGame(record: GameRecord): Promise<Map<string, { profile: Profile; ratingChange: number | null }>>;
 }
 
 export interface LobbyOptions {
@@ -39,8 +49,9 @@ export class Lobby {
   readonly opts: LobbyOptions;
 
   constructor(
-    private readonly tableDeps: Omit<TableDeps, 'onChange'>,
+    private readonly tableDeps: Omit<TableDeps, 'onChange' | 'onGameOver'>,
     opts: Partial<LobbyOptions> = {},
+    private readonly accounts: Accounts | null = null,
   ) {
     this.opts = { ...DEFAULT_LOBBY, ...opts };
     this.rng = tableDeps.rng ?? mulberry32((Math.random() * 2 ** 32) >>> 0);
@@ -54,10 +65,13 @@ export class Lobby {
     return this.tables.size;
   }
 
-  /** Handle one message from a client. `token` is null until hello. */
-  handle(client: Client, token: string | null, msg: ClientMessage): string | null {
+  /**
+   * Handle one message from a client. `token` is null until hello. Callers
+   * must await each message before passing the next one from the same client.
+   */
+  async handle(client: Client, token: string | null, msg: ClientMessage): Promise<string | null> {
     try {
-      if (msg.t === 'hello') return this.hello(client, msg.token, msg.name);
+      if (msg.t === 'hello') return await this.hello(client, msg.token, msg.name);
       if (!token) throw new TableError('Say hello first');
       const s = this.sessions.get(token)!;
       switch (msg.t) {
@@ -98,18 +112,27 @@ export class Lobby {
     }
   }
 
-  private hello(client: Client, token: string, name: string): string {
+  private async hello(client: Client, token: string, name: string): Promise<string> {
     if (!/^[A-Za-z0-9_-]{16,64}$/.test(token)) throw new TableError('Bad token');
     const clean = name.replace(/[^\p{L}\p{N} _.'-]/gu, '').trim().slice(0, 20) || 'Player';
     let s = this.sessions.get(token);
-    if (!s) {
+    const canRename = !s || !s.table || s.table.status === 'lobby'; // not mid-game
+    let profile: Profile | null = null;
+    if (this.accounts) {
+      const ident = await this.accounts.identify(token, canRename ? clean : s!.user.name);
+      profile = ident.profile;
+      s = this.sessions.get(token); // may have been created while we waited
+      if (!s) {
+        s = { token, user: { id: ident.id, name: ident.profile.name }, clients: new Set(), table: null };
+        this.sessions.set(token, s);
+      }
+    } else if (!s) {
       s = { token, user: { id: `u${this.sessions.size + 1}`, name: clean }, clients: new Set(), table: null };
       this.sessions.set(token, s);
-    } else if (!s.table || s.table.status === 'lobby') {
-      s.user.name = clean; // can't rename mid-game
     }
+    if (canRename) s.user.name = clean;
     s.clients.add(client);
-    client.send({ t: 'welcome', name: s.user.name });
+    client.send({ t: 'welcome', name: s.user.name, profile });
     if (s.table) {
       s.table.join(s.user); // reconnect to the same seat
       this.push(s.table);
@@ -126,7 +149,11 @@ export class Lobby {
   }
 
   private makeTable(host: User, settings: TableSettings): Table {
-    const t = new Table(this.newCode(), host, settings, { ...this.tableDeps, onChange: (tb) => this.push(tb) });
+    const t = new Table(this.newCode(), host, settings, {
+      ...this.tableDeps,
+      onChange: (tb) => this.push(tb),
+      onGameOver: (tb, rec) => this.gameOver(tb, rec),
+    });
     this.tables.set(t.code, t);
     this.members.set(t, new Set());
     return t;
@@ -215,6 +242,20 @@ export class Lobby {
     for (const t of [...this.tables.values()]) {
       if (!t.hasConnectedHumans() && t.idleMs() > this.opts.idleTableMs) this.removeTable(t);
     }
+  }
+
+  /** Record a finished game and tell its players their new ratings. */
+  private gameOver(t: Table, rec: GameRecord): void {
+    if (!this.accounts) return;
+    this.accounts
+      .recordGame(rec)
+      .then((updates) => {
+        for (const s of this.sessions.values()) {
+          const u = updates.get(s.user.id);
+          if (u) for (const c of s.clients) c.send({ t: 'profile', profile: u.profile, ratingChange: u.ratingChange });
+        }
+      })
+      .catch((e) => console.error(`Could not record game ${t.code}:`, e));
   }
 
   /** Send each seated human their own view of the table. */

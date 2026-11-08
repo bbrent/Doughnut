@@ -71,12 +71,12 @@ export async function localConn(onMessage: (m: ServerMessage) => void): Promise<
   const lobby = new Lobby({ makeBot: botFactory(await loadNet()), timing: { turnMs: 24 * 3600_000 } });
   const client: Client = { send: (m) => onMessage(m) };
   let token: string | null = null;
+  let chain: Promise<unknown> = Promise.resolve();
+  const enqueue = (msg: ClientMessage) => (chain = chain.then(async () => (token = await lobby.handle(client, token, msg))));
   return {
-    send(msg) {
-      queueMicrotask(() => (token = lobby.handle(client, token, msg)));
-    },
+    send: enqueue,
     close() {
-      if (token) lobby.handle(client, token, { t: 'leave' });
+      if (token) enqueue({ t: 'leave' });
     },
   };
 }

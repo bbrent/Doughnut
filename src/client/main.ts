@@ -1,6 +1,6 @@
 /** Web client: home, quick-match queue, lobby and game table. */
 import { MODES, RANKS, SUIT_SYMBOLS, rankOf, suitOf, type Card, type Move } from '../engine';
-import type { BotLevel, ClientMessage, ServerMessage, TableSettings, TableView, WireObservation } from '../game/protocol';
+import type { BotLevel, ClientMessage, Profile, ServerMessage, TableSettings, TableView, WireObservation } from '../game/protocol';
 import { localConn, onlineConn, type Conn, type Status } from './conn';
 import { chooseLayout, tableSvg } from './table-svg';
 
@@ -35,7 +35,20 @@ const st = {
   table: null as TableView | null,
   queuePos: 0,
   joinCode: new URLSearchParams(location.search).get('t')?.toUpperCase() ?? '',
+  profile: null as Profile | null,
+  ratingChange: null as number | null,
+  leaders: null as { name: string; rating: number; games: number; wins: number }[] | null,
 };
+
+function loadLeaders() {
+  fetch('api/leaderboard?limit=10')
+    .then((r) => (r.ok ? r.json() : null))
+    .then((rows) => {
+      st.leaders = rows;
+      if (st.screen === 'home') render();
+    })
+    .catch(() => {});
+}
 
 const app = document.getElementById('app')!;
 const toastEl = document.getElementById('toast')!;
@@ -50,6 +63,15 @@ function toast(msg: string) {
 function onMessage(m: ServerMessage) {
   switch (m.t) {
     case 'welcome':
+      if (!st.practice) st.profile = m.profile;
+      break;
+    case 'profile':
+      st.profile = m.profile;
+      st.ratingChange = m.ratingChange;
+      if (m.ratingChange !== null && m.profile.rating !== null) {
+        toast(`Rating ${m.profile.rating - m.ratingChange} → ${m.profile.rating} (${m.ratingChange >= 0 ? '+' : ''}${m.ratingChange})`);
+      }
+      loadLeaders();
       break;
     case 'table':
       st.table = m.table;
@@ -73,6 +95,8 @@ function onMessage(m: ServerMessage) {
 
 function backHome() {
   st.table = null;
+  st.ratingChange = null;
+  loadLeaders();
   st.screen = 'home';
   if (st.practice) {
     st.conn?.close();
@@ -147,7 +171,11 @@ const levelOptions = (sel: string) =>
 function homeHtml(): string {
   return `
   <h1><span class="ring"></span>Doughnut</h1>
-  <p class="sub">A trick-taking race to zero. Take tricks, dodge doughnuts.</p>
+  <p class="sub">A trick-taking race to zero. Take tricks, dodge doughnuts.${
+    st.profile && st.profile.rating !== null
+      ? ` <span class="pill">Rating ${st.profile.rating} · ${st.profile.games} game${st.profile.games === 1 ? '' : 's'} · ${st.profile.wins} win${st.profile.wins === 1 ? '' : 's'}</span>`
+      : ''
+  }</p>
   <div class="panel stack" style="margin-bottom:16px">
     ${st.joinCode ? `<h2>You're invited to table <span class="code">${esc(st.joinCode)}</span></h2>` : ''}
     <label for="name">Your name</label>
@@ -189,6 +217,7 @@ function homeHtml(): string {
       <div class="small muted">Runs entirely in your browser.</div>
     </div>
   </div>
+  ${leadersHtml()}
   <details class="panel" style="margin-top:16px">
     <summary><strong>How to play</strong></summary>
     <ul>
@@ -201,6 +230,16 @@ function homeHtml(): string {
       <li>First to 0 wins.</li>
     </ul>
   </details>`;
+}
+
+function leadersHtml(): string {
+  if (!st.leaders) return '';
+  const rows = st.leaders.length
+    ? `<table class="results"><tr><th>#</th><th>Player</th><th>Rating</th><th>Games</th><th>Wins</th></tr>${st.leaders
+        .map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.name)}</td><td>${r.rating}</td><td>${r.games}</td><td>${r.wins}</td></tr>`)
+        .join('')}</table>`
+    : '<div class="muted small">No rated games yet. Games with two or more people are rated.</div>';
+  return `<div class="panel" style="margin-top:16px"><h2>Leaderboard</h2>${rows}</div>`;
 }
 
 function queueHtml(): string {
@@ -289,7 +328,10 @@ function tableHtml(t: TableView): string {
   let bottom = promptAndHand(t, o);
   if (t.status === 'over') {
     const winners = t.winners.map((w) => (w === t.you ? 'You' : esc(t.seats[w].name))).join(' & ');
-    overlay = `<div class="overlay"><div class="overlay-card"><h2>${winners} win${t.winners.length === 1 && t.winners[0] !== t.you ? 's' : ''}!</h2>${resultsHtml(t, o)}</div></div>`;
+    const rc = st.ratingChange;
+    const ratingLine =
+      rc !== null && st.profile?.rating != null ? `<div class="small" style="margin-top:8px">Your rating: ${st.profile.rating} (${rc >= 0 ? '+' : ''}${rc})</div>` : '';
+    overlay = `<div class="overlay"><div class="overlay-card"><h2>${winners} win${t.winners.length === 1 && t.winners[0] !== t.you ? 's' : ''}!</h2>${resultsHtml(t, o)}${ratingLine}</div></div>`;
     bottom = `<div class="prompt"><div class="actions">${t.you === t.hostSeat ? '<button class="primary" data-action="start">Play again</button>' : '<span class="muted">The host can start a rematch.</span>'}<button data-action="leave">Leave</button></div></div>`;
   } else if (o.phase === 'handOver') {
     overlay = `<div class="overlay"><div class="overlay-card"><h2>Hand over</h2>${resultsHtml(t, o)}<div class="small muted" style="margin-top:6px">Next hand starting…</div></div></div>`;
@@ -365,6 +407,7 @@ app.addEventListener('click', (e) => {
       void practice({ mode: val('p-mode'), seats: Number(val('p-seats')), botLevel: val('p-level') as BotLevel });
       break;
     case 'start':
+      st.ratingChange = null;
       send({ t: 'start' });
       break;
     case 'leave':
@@ -413,6 +456,7 @@ app.addEventListener('input', (e) => {
 
 // Rejoin an in-progress online game after a reload, or open an invite link.
 if (st.joinCode && st.name) online().send({ t: 'join', code: st.joinCode });
-else if (store('doughnut-online') === '1') online();
+else if (store('doughnut-online') === '1' || st.name) online();
+loadLeaders();
 window.addEventListener('beforeunload', () => store('doughnut-online', st.table && !st.practice ? '1' : '0'));
 render();

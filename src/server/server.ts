@@ -12,6 +12,7 @@ import type { ClientMessage } from '../game/protocol';
 import type { TableDeps } from '../game/table';
 import { loadModel } from '../ml/dmc';
 import type { Mlp } from '../ml/mlp';
+import { MemoryStore, type Store } from './store';
 
 const TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -30,7 +31,9 @@ export interface ServerOptions {
   /** Path to the trained model (optional; bots fall back to the heuristic). */
   modelPath?: string;
   lobby?: Partial<LobbyOptions>;
-  table?: Omit<TableDeps, 'onChange' | 'makeBot'>;
+  table?: Omit<TableDeps, 'onChange' | 'onGameOver' | 'makeBot'>;
+  /** Players, games and ratings. Must already be initialised. Defaults to in-memory. */
+  store?: Store;
 }
 
 export function loadNet(path?: string): Mlp | null {
@@ -45,14 +48,28 @@ export function loadNet(path?: string): Mlp | null {
 
 export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby; close: () => Promise<void> } {
   const net = loadNet(opts.modelPath);
-  const lobby = new Lobby({ ...opts.table, makeBot: botFactory(net) }, opts.lobby);
+  const store = opts.store ?? new MemoryStore();
+  const lobby = new Lobby({ ...opts.table, makeBot: botFactory(net) }, opts.lobby, store);
   const root = resolve(opts.publicDir);
 
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://x');
     if (url.pathname === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, tables: lobby.tableCount, model: net !== null }));
+      res.end(JSON.stringify({ ok: true, tables: lobby.tableCount, model: net !== null, store: store.constructor.name }));
+      return;
+    }
+    if (url.pathname === '/api/leaderboard') {
+      store
+        .leaderboard(Number(url.searchParams.get('limit') ?? 20))
+        .then((rows) => {
+          res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' });
+          res.end(JSON.stringify(rows));
+        })
+        .catch((e) => {
+          console.error('leaderboard failed:', e);
+          res.writeHead(500).end('[]');
+        });
       return;
     }
     // Static files; unknown paths fall back to index.html (invite links like /?t=CODE).
@@ -77,6 +94,8 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
   wss.on('connection', (ws: WebSocket) => {
     let token: string | null = null;
     let alive = true;
+    // Messages from one connection are handled strictly in order.
+    let chain: Promise<unknown> = Promise.resolve();
     const client = {
       send: (msg: unknown) => {
         if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
@@ -95,11 +114,13 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
       } catch {
         return client.send({ t: 'error', message: 'Bad message' });
       }
-      token = lobby.handle(client, token, msg);
+      chain = chain.then(async () => {
+        token = await lobby.handle(client, token, msg);
+      });
     });
     ws.on('close', () => {
       clearInterval(ping);
-      lobby.disconnect(client, token);
+      chain = chain.then(() => lobby.disconnect(client, token));
     });
   });
 

@@ -134,43 +134,43 @@ describe('lobby', () => {
     return { clock, lobby };
   }
 
-  it('create, share code, join, start, and both see the game', () => {
+  it('create, share code, join, start, and both see the game', async () => {
     const { lobby } = setup();
     const a = new Recorder();
     const b = new Recorder();
-    lobby.handle(a, null, { t: 'hello', token: T1, name: 'Alice' });
-    lobby.handle(b, null, { t: 'hello', token: T2, name: '<b>Bob</b>' });
-    lobby.handle(a, T1, { t: 'create', settings: { mode: 'doughnut', seats: 4, botLevel: 'easy' } });
+    await lobby.handle(a, null, { t: 'hello', token: T1, name: 'Alice' });
+    await lobby.handle(b, null, { t: 'hello', token: T2, name: '<b>Bob</b>' });
+    await lobby.handle(a, T1, { t: 'create', settings: { mode: 'doughnut', seats: 4, botLevel: 'easy' } });
     const code = a.table!.code;
     expect(code).toMatch(/^[A-Z2-9]{5}$/);
-    lobby.handle(b, T2, { t: 'join', code: code.toLowerCase() });
+    await lobby.handle(b, T2, { t: 'join', code: code.toLowerCase() });
     expect(a.table!.seats[1].name).toBe('bBobb'); // markup characters stripped
-    lobby.handle(b, T2, { t: 'start' });
+    await lobby.handle(b, T2, { t: 'start' });
     expect(b.last('error')!.message).toMatch(/host/);
-    lobby.handle(a, T1, { t: 'start' });
+    await lobby.handle(a, T1, { t: 'start' });
     expect(a.table!.status).toBe('playing');
     expect(b.table!.status).toBe('playing');
     expect(b.table!.you).toBe(1);
   });
 
-  it('reconnecting with the same token returns to the same seat', () => {
+  it('reconnecting with the same token returns to the same seat', async () => {
     const { lobby } = setup();
     const a = new Recorder();
-    lobby.handle(a, null, { t: 'hello', token: T1, name: 'Alice' });
-    lobby.handle(a, T1, { t: 'create', settings: { mode: 'doughnut', seats: 2, botLevel: 'easy' } });
-    lobby.handle(a, T1, { t: 'start' });
+    await lobby.handle(a, null, { t: 'hello', token: T1, name: 'Alice' });
+    await lobby.handle(a, T1, { t: 'create', settings: { mode: 'doughnut', seats: 2, botLevel: 'easy' } });
+    await lobby.handle(a, T1, { t: 'start' });
     lobby.disconnect(a, T1);
     const a2 = new Recorder();
-    lobby.handle(a2, null, { t: 'hello', token: T1, name: 'Alice' });
+    await lobby.handle(a2, null, { t: 'hello', token: T1, name: 'Alice' });
     expect(a2.table!.you).toBe(0);
     expect(a2.table!.status).toBe('playing');
   });
 
-  it('quick match fills with bots after the wait, or starts at once when full', () => {
+  it('quick match fills with bots after the wait, or starts at once when full', async () => {
     const { clock, lobby } = setup();
     const a = new Recorder();
-    lobby.handle(a, null, { t: 'hello', token: T1, name: 'Alice' });
-    lobby.handle(a, T1, { t: 'quick', mode: 'doughnut' });
+    await lobby.handle(a, null, { t: 'hello', token: T1, name: 'Alice' });
+    await lobby.handle(a, T1, { t: 'quick', mode: 'doughnut' });
     expect(a.last('queued')!.position).toBe(1);
     clock.advance(5_000);
     lobby.tick();
@@ -178,27 +178,27 @@ describe('lobby', () => {
     expect(a.table!.seats.filter((s) => s.kind === 'bot')).toHaveLength(2);
 
     const rs = [0, 1, 2].map(() => new Recorder());
-    rs.forEach((r, i) => {
+    for (const [i, r] of rs.entries()) {
       const tok = `tokenQ${i}QQQQQQQQQQQQQQQ`;
-      lobby.handle(r, null, { t: 'hello', token: tok, name: `P${i}` });
-      lobby.handle(r, tok, { t: 'quick', mode: 'doughnut' });
-    });
+      await lobby.handle(r, null, { t: 'hello', token: tok, name: `P${i}` });
+      await lobby.handle(r, tok, { t: 'quick', mode: 'doughnut' });
+    }
     for (const r of rs) expect(r.table!.seats.filter((s) => s.kind === 'human')).toHaveLength(3);
   });
 
-  it('rejects bad input without crashing', () => {
+  it('rejects bad input without crashing', async () => {
     const { lobby } = setup();
     const a = new Recorder();
-    lobby.handle(a, null, { t: 'start' });
+    await lobby.handle(a, null, { t: 'start' });
     expect(a.last('error')).toBeTruthy();
-    lobby.handle(a, null, { t: 'hello', token: 'short', name: 'x' });
+    await lobby.handle(a, null, { t: 'hello', token: 'short', name: 'x' });
     expect(a.last('error')!.message).toMatch(/token/i);
-    lobby.handle(a, null, { t: 'hello', token: T1, name: 'Alice' });
-    lobby.handle(a, T1, { t: 'join', code: 'ZZZZZ' });
+    await lobby.handle(a, null, { t: 'hello', token: T1, name: 'Alice' });
+    await lobby.handle(a, T1, { t: 'join', code: 'ZZZZZ' });
     expect(a.last('error')!.message).toMatch(/No table/);
-    lobby.handle(a, T1, { t: 'create', settings: { mode: 'doughnut', seats: 50, botLevel: 'easy' } });
+    await lobby.handle(a, T1, { t: 'create', settings: { mode: 'doughnut', seats: 50, botLevel: 'easy' } });
     expect(a.last('error')!.message).toMatch(/seats/);
-    lobby.handle(a, T1, { t: 'move', move: { kind: 'card', card: 3 } });
+    await lobby.handle(a, T1, { t: 'move', move: { kind: 'card', card: 3 } });
     expect(a.last('error')!.message).toMatch(/not at a table/);
   });
 });
