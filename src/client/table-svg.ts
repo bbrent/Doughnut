@@ -6,6 +6,7 @@
  */
 import { RANKS, SUIT_SYMBOLS, rankOf, suitOf, type Card } from '../engine';
 import type { TableView, WireObservation } from '../game/protocol';
+import { robotSvg } from './icons';
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
@@ -34,7 +35,7 @@ const LANDSCAPE: Layout = {
 const PORTRAIT: Layout = {
   w: 620, h: 880, cx: 310, cy: 430,
   felt: [205, 330], rail: [250, 380], seat: [228, 382],
-  plate: [136, 66], card: [56, 80], playRadius: 0.5,
+  plate: [150, 66], card: [56, 80], playRadius: 0.5,
 };
 
 export function chooseLayout(viewportWidth: number): Layout {
@@ -112,22 +113,27 @@ function seatPlate(L: Layout, t: TableView, o: WireObservation | null, i: number
   const turn = !!o && o.toAct === i && (o.phase === 'play' || o.phase === 'declare' || o.phase === 'exchange');
   const out = !!o && o.playing[i] === false;
   const open = seat.kind === 'open';
-  const name = clip(seat.name, w > 150 ? 13 : 10);
+  const isBot = seat.kind === 'bot';
+  const hasIcon = isBot || seat.covered;
+  // The name gets the whole top line; ~9.5px per character at this size.
+  const name = clip(seat.name, Math.floor((w - (hasIcon ? 35 : 14) - 10) / 9.5));
 
   let status = '';
-  if (!o) status = open ? 'waiting…' : seat.kind === 'bot' ? 'bot' : i === t.hostSeat ? 'host' : seat.connected ? 'ready' : 'away';
+  if (!o) status = open ? 'waiting…' : isBot ? 'AI player' : i === t.hostSeat ? 'host' : seat.connected ? 'ready' : 'away';
   else if (seat.covered) status = 'away · bot playing';
   else if (o.phase === 'declare' && o.playing[i] === null) status = turn ? 'deciding…' : 'to decide';
   else if (o.playing[i] === false) status = 'folded';
   else if (o.playing[i]) status = `${o.tricksWon[i]} trick${o.tricksWon[i] === 1 ? '' : 's'}`;
 
   const cls = ['seat-plate', you ? 'you' : '', turn ? 'turn' : '', out ? 'out' : '', open ? 'open' : ''].join(' ');
-  const score = o ? `<text x="${w / 2 - 12}" y="${-h / 2 + 30}" text-anchor="end" class="plate-score">${o.scores[i]}</text>` : '';
+  const score = o ? `<text x="${w / 2 - 12}" y="${-h / 2 + 48}" text-anchor="end" class="plate-score">${o.scores[i]}</text>` : '';
   const dealer =
     o && o.dealer === i
       ? `<g transform="translate(${-w / 2 + 2} ${-h / 2 + 2})"><circle r="13" class="dealer-chip"/><text y="5" text-anchor="middle" class="dealer-text">D</text></g>`
       : '';
-  const bot = seat.kind === 'bot' ? `<text x="${w / 2 - 12}" y="${h / 2 - 12}" text-anchor="end" class="plate-tag">BOT</text>` : '';
+  // Robot icon before the name marks AI players.
+  const icon = hasIcon ? robotSvg(-w / 2 + 11, -h / 2 + 8, 20) : '';
+  const nameX = -w / 2 + (icon ? 35 : 14);
   // Pips for tricks taken this hand.
   const pips =
     o && o.playing[i]
@@ -135,9 +141,9 @@ function seatPlate(L: Layout, t: TableView, o: WireObservation | null, i: number
       : '';
   return `<g class="${cls}" transform="translate(${x.toFixed(1)} ${y.toFixed(1)})">
     <rect x="${-w / 2}" y="${-h / 2}" width="${w}" height="${h}" rx="14" class="plate-bg"/>
-    <text x="${-w / 2 + 14}" y="${-h / 2 + 24}" class="plate-name">${esc(name)}</text>
+    ${icon}<text x="${nameX}" y="${-h / 2 + 24}" class="plate-name">${esc(name)}</text>
     <text x="${-w / 2 + 14}" y="${-h / 2 + 44}" class="plate-status">${esc(status)}</text>
-    ${score}${bot}${pips}${dealer}
+    ${score}${pips}${dealer}
   </g>`;
 }
 

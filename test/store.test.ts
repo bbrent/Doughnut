@@ -72,6 +72,7 @@ async function exerciseStore(store: Store) {
   expect(await store.sessionAccount(TA)).toBeNull();
   await expect(store.register(TA, 'Al', '123')).rejects.toThrow(/6 characters/);
   await expect(store.register(TA, 'Guest', 'secret1')).rejects.toThrow(/can't be registered/);
+  await expect(store.register('tokenZZZZZZZZZZZZZZZZ', 'Botimus', 'secret1')).resolves.toBeTruthy(); // "Bot" names are fine: bots have an icon
   const a = await store.register(TA, 'Alice', 'secret1');
   expect(a.profile).toMatchObject({ name: 'Alice', rating: 1000, games: 0 });
   await expect(store.register(TB, 'ALICE', 'other12')).rejects.toThrow(/already registered/);
@@ -97,7 +98,7 @@ async function exerciseStore(store: Store) {
   expect(solo.get(b.id)).toMatchObject({ ratingChange: null, profile: { games: 2, wins: 0 } });
 
   const board = await store.leaderboard(10);
-  expect(board.map((r) => r.name)).toEqual(['Alice', 'Bob']);
+  expect(board.map((r) => r.name)).toEqual(['Alice', 'Bob']); // Botimus has no rated games
 }
 
 describe('MemoryStore', () => {

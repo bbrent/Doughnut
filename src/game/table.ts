@@ -16,6 +16,7 @@ import {
   type Move,
   type Rng,
 } from '../engine';
+import { BOT_NAMES, pickBotNames } from './bot-names';
 import { toWire, type BotLevel, type GameRecord, type SeatView, type TableSettings, type TableView } from './protocol';
 
 export interface Clock {
@@ -157,7 +158,8 @@ export class Table {
         if (next >= 0) this.hostSeat = next;
       }
     } else {
-      this.seats[i] = { kind: 'bot', name: `${(this.seats[i] as { user: User }).user.name} (bot)` };
+      // A bot plays on under the leaver's name; the robot icon shows it's a bot now.
+      this.seats[i] = { kind: 'bot', name: (this.seats[i] as { user: User }).user.name };
       this.bots[i] = this.deps.makeBot(this.settings.botLevel);
       if (i === this.hostSeat) {
         const next = this.seats.findIndex((s) => s.kind === 'human');
@@ -185,11 +187,13 @@ export class Table {
     if (this.seatOf(userId) !== this.hostSeat) throw new TableError('Only the host can start');
     if (this.status === 'playing') throw new TableError('Already playing');
     const config = MODES[this.settings.mode];
-    let botNo = 0;
+    // Bots keep their names for a rematch; open seats, and bots that took over
+    // for someone who left, get a fresh bot name.
+    const keeps = (s: Seat) => s.kind === 'bot' && BOT_NAMES.includes(s.name);
+    const taken = this.seats.flatMap((s) => (s.kind === 'human' ? [s.user.name] : keeps(s) ? [(s as { name: string }).name] : []));
+    const names = pickBotNames(this.seats.filter((s) => s.kind !== 'human' && !keeps(s)).length, taken, this.rng);
     this.bots = this.seats.map((s, i) => {
-      if (s.kind === 'open' || s.kind === 'bot') {
-        this.seats[i] = { kind: 'bot', name: `Bot ${++botNo}` };
-      }
+      if (s.kind !== 'human' && !keeps(s)) this.seats[i] = { kind: 'bot', name: names.shift()! };
       return this.deps.makeBot(this.settings.botLevel);
     });
     const n = this.seats.length;

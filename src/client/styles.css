@@ -93,8 +93,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 .seat-plate.open .plate-bg { fill: rgba(0, 0, 0, 0.25); stroke-dasharray: 6 5; }
 .plate-name { fill: #fff; font-size: 17px; font-weight: 600; }
 .plate-status { fill: #c9d6cf; font-size: 13px; }
-.plate-score { fill: #fff; font-size: 26px; font-weight: 700; }
-.plate-tag { fill: #c9d6cf; font-size: 11px; letter-spacing: 1px; }
+.plate-score { fill: #fff; font-size: 22px; font-weight: 700; }
 .pip { fill: var(--accent); }
 .dealer-chip { fill: #f4f1ea; stroke: var(--accent); stroke-width: 3; }
 .dealer-text { fill: #1d2320; font-size: 14px; font-weight: 700; }
@@ -137,3 +136,11 @@ details summary { cursor: pointer; }
   .card { width: 48px; height: 70px; font-size: 18px; }
   .card span { font-size: 20px; }
 }
+
+/* Robot icon for AI players */
+.robot .robot-body { fill: #9fd3c7; }
+.robot .robot-line { stroke: #9fd3c7; stroke-width: 1.6; }
+.robot .robot-eye { fill: #1d2320; }
+.robot-inline { vertical-align: -3px; }
+.robot-inline .robot-body { fill: #4f9a8a; }
+.robot-inline .robot-line { stroke: #4f9a8a; }

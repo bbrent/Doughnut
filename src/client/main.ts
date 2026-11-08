@@ -2,6 +2,7 @@
 import { MODES, RANKS, SUIT_SYMBOLS, rankOf, suitOf, type Card, type Move } from '../engine';
 import type { AccountView, BotLevel, ClientMessage, ServerMessage, TableSettings, TableView, WireObservation } from '../game/protocol';
 import { localConn, onlineConn, type Conn, type Status } from './conn';
+import { robotHtml } from './icons';
 import { chooseLayout, tableSvg } from './table-svg';
 
 // ---- persistent per-browser settings ---------------------------------------
@@ -162,6 +163,8 @@ function send(msg: ClientMessage) {
 // ---- rendering helpers -------------------------------------------------------
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+/** A seat's name for HTML, with the robot icon for AI players. */
+const seatName = (t: TableView, i: number) => (t.seats[i].kind === 'bot' ? robotHtml() + ' ' : '') + esc(t.seats[i].name);
 const red = (c: Card) => suitOf(c) === 1 || suitOf(c) === 2;
 
 function cardHtml(c: Card, opts: { action?: string; legal?: boolean; small?: boolean; extra?: string } = {}): string {
@@ -320,7 +323,7 @@ function promptAndHand(t: TableView, o: WireObservation): string {
   const yourTurn = o.toAct === t.you && o.legalMoves.length > 0;
   const kinds = new Set(o.legalMoves.map((m) => m.kind));
   const trumpSym = o.trump === null ? '' : SUIT_SYMBOLS[o.trump];
-  const name = esc(t.seats[o.toAct]?.name ?? '');
+  const name = o.toAct >= 0 ? seatName(t, o.toAct) : '';
   const clock = t.deadline ? ` <span class="countdown muted" data-deadline="${t.deadline}"></span>` : '';
   const hand = sortHand(o.hand, o.trump);
   let prompt = '';
@@ -360,7 +363,7 @@ function resultsHtml(t: TableView, o: WireObservation): string {
     .map((s, i) => {
       const d = h.deltas[i];
       const what = !h.played[i] ? 'folded' : h.tricks[i] === 0 ? 'doughnut!' : `${h.tricks[i]} trick${h.tricks[i] === 1 ? '' : 's'}`;
-      return `<tr><td>${esc(s.name)}${i === t.you ? ' (you)' : ''}</td><td>${what}</td><td class="${d < 0 ? 'good' : d > 0 ? 'bad' : ''}">${d > 0 ? '+' : ''}${d}</td><td>${o.scores[i]}</td></tr>`;
+      return `<tr><td>${seatName(t, i)}${i === t.you ? ' (you)' : ''}</td><td>${what}</td><td class="${d < 0 ? 'good' : d > 0 ? 'bad' : ''}">${d > 0 ? '+' : ''}${d}</td><td>${o.scores[i]}</td></tr>`;
     })
     .join('');
   return `<table class="results"><tr><th>Player</th><th>Hand</th><th>Change</th><th>Score</th></tr>${rows}</table>`;
@@ -392,7 +395,7 @@ function tableHtml(t: TableView): string {
   let overlay = '';
   let bottom = promptAndHand(t, o);
   if (t.status === 'over') {
-    const winners = t.winners.map((w) => (w === t.you ? 'You' : esc(t.seats[w].name))).join(' & ');
+    const winners = t.winners.map((w) => (w === t.you ? 'You' : seatName(t, w))).join(' & ');
     const rc = st.ratingChange;
     const ratingLine =
       rc !== null && st.account

@@ -173,7 +173,6 @@ export class Lobby {
   /** A guest may not use a nickname someone has registered. ('Guest' = not chosen yet.) */
   private async checkGuestName(name: string): Promise<void> {
     if (name === 'Guest') return;
-    if (/^bot\b/i.test(name)) throw new AccountError('Pick a nickname that doesn\'t start with "Bot"');
     if (this.accounts && (await this.accounts.isRegistered(name))) {
       throw new AccountError(`"${name}" is a registered nickname. Log in, or pick another.`);
     }

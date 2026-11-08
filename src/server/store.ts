@@ -98,7 +98,7 @@ function applyGame(rec: GameRecord, rows: Map<number, PlayerRow>) {
 function validateRegistration(nickname: string, password: string) {
   const n = cleanNickname(nickname);
   if (n.length < 2) throw new AccountError('Pick a nickname of at least 2 characters');
-  if (/^(guest|bot)\b/i.test(n)) throw new AccountError(`"${n}" can't be registered. Pick another nickname.`);
+  if (/^guest$/i.test(n)) throw new AccountError(`"${n}" can't be registered. Pick another nickname.`);
   const bad = checkNewPassword(password);
   if (bad) throw new AccountError(bad);
 }

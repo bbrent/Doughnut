@@ -202,3 +202,38 @@ describe('lobby', () => {
     expect(a.last('error')!.message).toMatch(/not at a table/);
   });
 });
+
+describe('bot names', () => {
+  it('are distinct, short, and never copy a human at the table', async () => {
+    const { BOT_NAMES, pickBotNames } = await import('../src/game/bot-names');
+    for (const n of BOT_NAMES) expect(n.length).toBeLessThanOrEqual(12);
+    expect(new Set(BOT_NAMES.map((n) => n.toLowerCase())).size).toBe(BOT_NAMES.length);
+    const rng = mulberry32(5);
+    for (let k = 0; k < 50; k++) {
+      const names = pickBotNames(5, ['clanky', 'Gizmo'], rng);
+      expect(new Set(names).size).toBe(5);
+      expect(names).not.toContain('Clanky');
+      expect(names).not.toContain('Gizmo');
+    }
+    expect(pickBotNames(BOT_NAMES.length + 2, [], rng).slice(-2)).toEqual(['Robot 1', 'Robot 2']);
+  });
+
+  it('bots get names from the list, keep them for a rematch, and a leaver keeps theirs', async () => {
+    const { BOT_NAMES } = await import('../src/game/bot-names');
+    const clock = new FakeClock();
+    const t = table(clock, 4);
+    t.join(bob);
+    t.start('a');
+    const first = t.view('a').seats.filter((s) => s.kind === 'bot').map((s) => s.name);
+    expect(first).toHaveLength(2);
+    for (const n of first) expect(BOT_NAMES).toContain(n);
+    t.leave('b');
+    expect(t.view('a').seats[1]).toMatchObject({ kind: 'bot', name: 'Bob' });
+    clock.runAll();
+    t.start('a'); // rematch
+    const again = t.view('a').seats.map((s) => s.name);
+    expect(again.slice(2)).toEqual(first);
+    expect(BOT_NAMES).toContain(again[1]); // Bob's seat now has a real bot name
+    expect(new Set(again).size).toBe(4);
+  });
+});
