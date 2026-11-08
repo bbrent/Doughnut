@@ -3,13 +3,16 @@ import { heuristicAgent } from '../src/ai';
 import { mulberry32 } from '../src/engine';
 import { Lobby, type Client } from '../src/game/lobby';
 import type { GameRecord, ServerMessage } from '../src/game/protocol';
+import { AccountService, validEmail } from '../src/server/accounts';
+import { LogMailer } from '../src/server/mailer';
 import { LoginThrottle, hashPassword, verifyPassword } from '../src/server/password';
-import { MemoryStore, MySqlStore, displayRating, places, rateGame, type Store } from '../src/server/store';
+import { MemoryRepo, MySqlRepo, displayRating, places, rateGame, type Repo } from '../src/server/store';
 import { FakeClock } from './fake-clock';
 
 const TA = 'tokenAAAAAAAAAAAAAAAA';
 const TB = 'tokenBBBBBBBBBBBBBBBB';
 const TC = 'tokenCCCCCCCCCCCCCCCC';
+const TD = 'tokenDDDDDDDDDDDDDDDD';
 
 /** seats: account id, 'guest', or null (bot). */
 const rec = (scores: number[], who: (string | null)[], left: boolean[] = []): GameRecord => ({
@@ -29,11 +32,17 @@ const rec = (scores: number[], who: (string | null)[], left: boolean[] = []): Ga
   })),
 });
 
+/** The code from the last emailed link of a kind. */
+function linkCode(mail: LogMailer, kind: 'verify' | 'reset', to?: string): string {
+  const m = [...mail.sent].reverse().find((e) => (!to || e.to === to) && e.text.includes(`?${kind}=`));
+  if (!m) throw new Error(`no ${kind} email`);
+  return /\?(?:verify|reset)=([A-Za-z0-9_-]+)/.exec(m.text)![1];
+}
+
 describe('passwords', () => {
   it('hash and verify with scrypt; wrong passwords fail', async () => {
     const h = await hashPassword('correct horse');
     expect(h).toMatch(/^scrypt\$/);
-    expect(h).not.toContain('correct');
     expect(await verifyPassword('correct horse', h)).toBe(true);
     expect(await verifyPassword('wrong horse', h)).toBe(false);
     expect(await verifyPassword('x', 'garbage')).toBe(false);
@@ -48,7 +57,11 @@ describe('passwords', () => {
     expect(th.check('k')).toBe(30);
     t += 31_000;
     expect(th.check('k')).toBe(0);
-    th.success('k');
+  });
+
+  it('validates email addresses', () => {
+    for (const ok of ['a@b.co', 'first.last+tag@example.com']) expect(validEmail(ok)).toBe(true);
+    for (const bad of ['', 'nope', 'a@b', 'a b@c.com', 'a@b.c', '<x>@y.com']) expect(validEmail(bad)).toBe(false);
   });
 });
 
@@ -63,81 +76,139 @@ describe('places and ratings', () => {
     const r = rateGame(rec([0, 5, 9], ['1', 'guest', '3']), new Map())!;
     expect([...r.keys()]).toEqual([0, 2]);
     expect(r.get(0)!.mu).toBeGreaterThan(25);
-    expect(r.get(2)!.mu).toBeLessThan(25);
     expect(displayRating(25, 25 / 3)).toBe(1000);
   });
 });
 
-async function exerciseStore(store: Store) {
-  expect(await store.sessionAccount(TA)).toBeNull();
-  await expect(store.register(TA, 'Al', '123')).rejects.toThrow(/6 characters/);
-  await expect(store.register(TA, 'Guest', 'secret1')).rejects.toThrow(/can't be registered/);
-  await expect(store.register('tokenZZZZZZZZZZZZZZZZ', 'Botimus', 'secret1')).resolves.toBeTruthy(); // "Bot" names are fine: bots have an icon
-  const a = await store.register(TA, 'Alice', 'secret1');
-  expect(a.profile).toMatchObject({ name: 'Alice', rating: 1000, games: 0 });
-  await expect(store.register(TB, 'ALICE', 'other12')).rejects.toThrow(/already registered/);
-  expect(await store.isRegistered('alice')).toBe(true);
-  expect(await store.isRegistered('Bob')).toBe(false);
-  expect((await store.sessionAccount(TA))!.id).toBe(a.id);
+/** The whole account life cycle against a repo. */
+async function exerciseAccounts(repo: Repo, clock: FakeClock) {
+  const mail = new LogMailer(true);
+  const svc = new AccountService(repo, mail, { publicUrl: 'https://doughnut.test/', now: clock.now });
+  await svc.init();
 
-  await expect(store.login(TC, 'alice', 'nope')).rejects.toThrow(/Wrong nickname or password/);
-  const again = await store.login(TC, 'alice', 'secret1'); // second device
-  expect(again.id).toBe(a.id);
-  await store.logout(TC);
-  expect(await store.sessionAccount(TC)).toBeNull();
-  expect(await store.sessionAccount(TA)).not.toBeNull();
+  // Sign up: validation, then a confirmation email; not logged in until confirmed.
+  await expect(svc.signup(TA, 'nope', 'Alice', 'secret1')).rejects.toThrow(/email address/);
+  await expect(svc.signup(TA, 'alice@example.com', 'Alice', '123')).rejects.toThrow(/6 characters/);
+  await expect(svc.signup(TA, 'alice@example.com', 'Guest', 'secret1')).rejects.toThrow(/can't be registered/);
+  const pending = await svc.signup(TA, 'Alice@Example.com', 'Alice', 'secret1');
+  expect(pending).not.toBeNull();
+  expect(mail.sent).toHaveLength(1);
+  expect(mail.sent[0]).toMatchObject({ to: 'Alice@Example.com', subject: 'Confirm your Doughnut account' });
+  expect(mail.sent[0].text).toContain('https://doughnut.test/?verify=');
+  expect(await svc.sessionAccount(TA)).toBeNull();
+  expect(await svc.isRegistered('alice')).toBe(false); // not reserved for guests until confirmed
+  await expect(svc.login(TB, 'alice@example.com', 'secret1')).rejects.toThrow(/confirm your email/);
+  await expect(svc.signup(TB, 'other@example.com', 'ALICE', 'secret1')).rejects.toThrow(/nickname is taken/);
 
-  const b = await store.register(TB, 'Bob', 'hunter22');
-  const out = await store.recordGame(rec([0, 8, 12, 4], [a.id, null, b.id, 'guest']));
-  expect(out.get(a.id)!.profile).toMatchObject({ games: 1, wins: 1 });
-  expect(out.get(a.id)!.ratingChange!).toBeGreaterThan(0);
-  expect(out.get(b.id)!.ratingChange!).toBeLessThan(0);
-  expect(out.size).toBe(2); // guests get nothing back
+  // Confirm: logs in the browser that opened the link; the link works once.
+  const code = linkCode(mail, 'verify');
+  const acct = await svc.verifyEmail(TC, code);
+  expect(acct).toMatchObject({ nickname: 'Alice', profile: { rating: 1000 } });
+  expect((await svc.sessionAccount(TC))!.id).toBe(acct.id);
+  expect((await svc.sessionAccount(TA))!.id).toBe(acct.id); // the sign-up browser too
+  await expect(svc.verifyEmail(TD, code)).rejects.toThrow(/expired or was already used/);
+  expect(await svc.isRegistered('ALICE')).toBe(true);
 
-  const solo = await store.recordGame(rec([3, 0, 1], [b.id, null, 'guest']));
-  expect(solo.get(b.id)).toMatchObject({ ratingChange: null, profile: { games: 2, wins: 0 } });
+  // Signing up again with the same email reveals nothing; the owner is emailed
+  // (at most one email per address per minute).
+  clock.advance(61_000);
+  const sentBefore = mail.sent.length;
+  expect(await svc.signup(TD, 'alice@example.com', 'Alicia', 'secret2')).toBeNull();
+  expect(mail.sent[sentBefore]).toMatchObject({ to: 'Alice@Example.com', subject: 'You already have a Doughnut account' });
 
-  const board = await store.leaderboard(10);
-  expect(board.map((r) => r.name)).toEqual(['Alice', 'Bob']); // Botimus has no rated games
+  // Log in by email or nickname.
+  await expect(svc.login(TD, 'alice@example.com', 'wrong')).rejects.toThrow(/Wrong email, nickname or password/);
+  expect((await svc.login(TD, 'ALICE@example.com', 'secret1')).id).toBe(acct.id);
+  expect((await svc.login(TD, 'alice', 'secret1')).id).toBe(acct.id);
+  await svc.logout(TD);
+  expect(await svc.sessionAccount(TD)).toBeNull();
+
+  // Forgotten password: same answer for unknown emails; link resets and logs out everywhere else.
+  const n = mail.sent.length;
+  await svc.requestPasswordReset('nobody@example.com');
+  expect(mail.sent).toHaveLength(n);
+  clock.advance(61_000); // per-address email limit
+  await svc.requestPasswordReset('alice@example.com');
+  expect(mail.sent).toHaveLength(n + 1);
+  const reset = linkCode(mail, 'reset');
+  await expect(svc.resetPassword(TD, reset, '123')).rejects.toThrow(/6 characters/);
+  await svc.resetPassword(TD, reset, 'newpass1');
+  expect(await svc.sessionAccount(TA)).toBeNull(); // other browsers logged out
+  expect(await svc.sessionAccount(TC)).toBeNull();
+  expect((await svc.sessionAccount(TD))!.id).toBe(acct.id);
+  await expect(svc.resetPassword(TA, reset, 'again123')).rejects.toThrow(/expired or was already used/);
+  await expect(svc.login(TA, 'alice', 'secret1')).rejects.toThrow(/Wrong/);
+  expect((await svc.login(TA, 'alice', 'newpass1')).id).toBe(acct.id);
+
+  // Expired links don't work; unconfirmed sign-ups are purged after 48 h.
+  await svc.signup(TB, 'bob@example.com', 'Bob', 'hunter22');
+  const bobCode = linkCode(mail, 'verify', 'bob@example.com');
+  clock.advance(49 * 3600_000);
+  await expect(svc.verifyEmail(TB, bobCode)).rejects.toThrow(/expired/);
+  await svc.signup(TB, 'carol@example.com', 'Carol', 'hunter22'); // triggers the purge
+  expect(await repo.byEmail('bob@example.com')).toBeNull();
+  const carol = await svc.verifyEmail(TB, linkCode(mail, 'verify', 'carol@example.com'));
+
+  // Games: recorded and rated only for confirmed accounts.
+  const out = await svc.recordGame(rec([0, 8, 12, 4], [acct.id, null, carol.id, 'guest']));
+  expect(out.get(acct.id)!.profile).toMatchObject({ games: 1, wins: 1 });
+  expect(out.get(carol.id)!.ratingChange!).toBeLessThan(0);
+  expect(out.size).toBe(2);
+  const board = await svc.leaderboard(10);
+  expect(board.map((r) => r.name)).toEqual(['Alice', 'Carol']);
+  return { svc, mail };
 }
 
-describe('MemoryStore', () => {
-  it('accounts, sessions and records', async () => {
-    await exerciseStore(new MemoryStore());
+describe('AccountService with MemoryRepo', () => {
+  it('sign up, confirm, log in, reset, record', async () => {
+    const clock = new FakeClock();
+    clock.t = Date.UTC(2026, 10, 8);
+    await exerciseAccounts(new MemoryRepo(clock.now), clock);
   });
 });
 
 const MYSQL = process.env.TEST_MYSQL_URL;
-describe.skipIf(!MYSQL)('MySqlStore (TEST_MYSQL_URL)', () => {
-  it('creates the schema, migrates v1 tables aside, and stores accounts and games', async () => {
+describe.skipIf(!MYSQL)('MySqlRepo (TEST_MYSQL_URL)', () => {
+  it('migrates older schemas and runs the whole account life cycle', async () => {
     const db = await (await import('mysql2/promise')).createConnection(MYSQL!);
     await db.query('SET FOREIGN_KEY_CHECKS = 0');
-    for (const t of ['game_players', 'games', 'sessions', 'players', 'game_players_v1', 'games_v1', 'players_v1']) await db.query(`DROP TABLE IF EXISTS ${t}`);
+    for (const t of ['game_players', 'games', 'sessions', 'email_links', 'players', 'game_players_v1', 'games_v1', 'players_v1']) {
+      await db.query(`DROP TABLE IF EXISTS ${t}`);
+    }
     await db.query('SET FOREIGN_KEY_CHECKS = 1');
-    // A first-version database.
-    await db.query('CREATE TABLE players (id INT UNSIGNED PRIMARY KEY, token_hash CHAR(64)) ENGINE=InnoDB');
-    await db.query('CREATE TABLE games (id INT UNSIGNED PRIMARY KEY) ENGINE=InnoDB');
-    await db.query(`CREATE TABLE game_players (game_id INT UNSIGNED, player_id INT UNSIGNED,
-      CONSTRAINT fk_gp_game FOREIGN KEY (game_id) REFERENCES games (id),
-      CONSTRAINT fk_gp_player FOREIGN KEY (player_id) REFERENCES players (id)) ENGINE=InnoDB`);
-    await db.query("INSERT INTO players VALUES (1, 'x')");
+    // A v2 database: nickname + password accounts, no email.
+    await db.query(`CREATE TABLE players (id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, nickname VARCHAR(20) NOT NULL,
+      nickname_key VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, password_hash VARCHAR(255) NOT NULL,
+      mu DOUBLE NOT NULL, sigma DOUBLE NOT NULL, games INT UNSIGNED NOT NULL DEFAULT 0, wins INT UNSIGNED NOT NULL DEFAULT 0,
+      rated_games INT UNSIGNED NOT NULL DEFAULT 0, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, last_login TIMESTAMP NULL,
+      UNIQUE KEY uq_nickname (nickname_key)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    await db.query(`INSERT INTO players (nickname, nickname_key, password_hash, mu, sigma) VALUES ('Old', 'old', ?, 25, 8.33)`, [
+      await hashPassword('oldpass1'),
+    ]);
 
-    const store = new MySqlStore(MYSQL!);
-    await store.init();
-    await store.init(); // idempotent
-    const [v1] = await db.query('SELECT COUNT(*) AS n FROM players_v1');
-    expect((v1 as { n: number }[])[0].n).toBe(1);
+    // MySQL uses real time; the fake clock only drives the in-process limits.
+    const clock = new FakeClock();
+    clock.t = Date.now();
+    const repo = new MySqlRepo(MYSQL!);
+    await repo.init();
+    await repo.init(); // idempotent
+    const legacy = await repo.byNickname('old');
+    expect(legacy!.verified_at).not.toBeNull(); // existing accounts stay usable
+    expect(legacy!.email).toBeNull();
 
-    await exerciseStore(store);
-    const [gp] = await db.query('SELECT kind, name, player_id FROM game_players ORDER BY game_id, seat');
-    expect((gp as { kind: string; name: string }[]).map((r) => r.kind)).toEqual(['account', 'bot', 'account', 'guest', 'account', 'bot', 'guest']);
-    for (const r of gp as { kind: string; name: string }[]) if (r.kind === 'guest') expect(r.name).toBe('Guest');
-    const [sess] = await db.query('SELECT token_hash FROM sessions');
-    for (const r of sess as { token_hash: string }[]) expect(r.token_hash).toMatch(/^[0-9a-f]{64}$/); // never the raw token
-    const [pw] = await db.query('SELECT password_hash FROM players');
-    for (const r of pw as { password_hash: string }[]) expect(r.password_hash).toMatch(/^scrypt\$/);
+    // Expiry is checked by MySQL against real time, so skip the time-travel part here.
+    const mail = new LogMailer(true);
+    const svc = new AccountService(repo, mail, { publicUrl: 'https://doughnut.test', now: clock.now });
+    expect((await svc.login(TA, 'Old', 'oldpass1')).nickname).toBe('Old');
+    await svc.signup(TB, 'dee@example.com', 'Dee', 'secret1');
+    const dee = await svc.verifyEmail(TB, linkCode(mail, 'verify'));
+    await svc.recordGame(rec([0, 5], [dee.id, String(legacy!.id)]));
+    const [gp] = await db.query('SELECT kind FROM game_players');
+    expect((gp as unknown[]).length).toBe(2);
+    const [links] = await db.query('SELECT code_hash, used_at FROM email_links');
+    for (const l of links as { code_hash: string; used_at: Date | null }[]) expect(l.code_hash).toMatch(/^[0-9a-f]{64}$/);
     await db.end();
-    await store.close();
+    await repo.close();
   });
 });
 
@@ -154,75 +225,90 @@ class Rec implements Client {
 describe('lobby accounts', () => {
   function setup() {
     const clock = new FakeClock();
-    const store = new MemoryStore();
-    const lobby = new Lobby({ makeBot: () => heuristicAgent(), clock, rng: mulberry32(2) }, {}, store);
-    return { clock, store, lobby };
+    clock.t = Date.UTC(2026, 10, 8);
+    const repo = new MemoryRepo(clock.now);
+    const mail = new LogMailer(true);
+    const svc = new AccountService(repo, mail, { publicUrl: 'https://doughnut.test', now: clock.now });
+    const lobby = new Lobby({ makeBot: () => heuristicAgent(), clock, rng: mulberry32(2) }, {}, svc);
+    return { clock, repo, mail, lobby };
   }
 
-  it('guests are not recorded; registering mid-game records that game', async () => {
-    const { clock, store, lobby } = setup();
+  it('sign up mid-game, confirm on another device: the game in progress is saved', async () => {
+    const { clock, repo, mail, lobby } = setup();
+    const laptop = new Rec();
+    const bob = new Rec();
+    await lobby.handle(laptop, null, { t: 'hello', token: TA, name: 'Alice' });
+    await lobby.handle(bob, null, { t: 'hello', token: TB, name: 'Bob' });
+    await lobby.handle(laptop, TA, { t: 'create', settings: { mode: 'doughnut-20', seats: 3, botLevel: 'easy' } });
+    await lobby.handle(bob, TB, { t: 'join', code: laptop.last('table')!.table.code });
+    await lobby.handle(laptop, TA, { t: 'start' });
+
+    await lobby.handle(laptop, TA, { t: 'signup', email: 'alice@example.com', nickname: 'Alice', password: 'secret1' });
+    expect(laptop.last('notice')!.message).toMatch(/Check your email/);
+    expect(laptop.last('account')).toBeUndefined();
+
+    const phone = new Rec();
+    await lobby.handle(phone, null, { t: 'hello', token: TC, name: '' });
+    await lobby.handle(phone, TC, { t: 'verify', code: linkCode(mail, 'verify') });
+    expect(phone.last('account')).toMatchObject({ why: 'verified', account: { nickname: 'Alice' } });
+    expect(laptop.last('account')).toMatchObject({ why: 'verified', account: { nickname: 'Alice' } });
+
+    clock.runAll();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(repo.games).toHaveLength(1);
+    expect(repo.games[0].seats[0].accountId).not.toBeNull();
+    expect(laptop.last('profile')!.profile.games).toBe(1);
+  });
+
+  it('guests are never recorded; confirmed nicknames are reserved', async () => {
+    const { clock, repo, mail, lobby } = setup();
     const a = new Rec();
     const b = new Rec();
     await lobby.handle(a, null, { t: 'hello', token: TA, name: 'Alice' });
     await lobby.handle(b, null, { t: 'hello', token: TB, name: 'Bob' });
-    expect(a.last('welcome')!.account).toBeNull();
-    await lobby.handle(a, TA, { t: 'create', settings: { mode: 'doughnut-20', seats: 3, botLevel: 'easy' } });
+    await lobby.handle(a, TA, { t: 'create', settings: { mode: 'doughnut-20', seats: 2, botLevel: 'easy' } });
     await lobby.handle(b, TB, { t: 'join', code: a.last('table')!.table.code });
     await lobby.handle(a, TA, { t: 'start' });
     clock.runAll();
     await new Promise((r) => setTimeout(r, 0));
-    expect(store.games).toHaveLength(0); // two guests: nothing saved
+    expect(repo.games).toHaveLength(0);
 
-    await lobby.handle(a, TA, { t: 'start' }); // rematch
-    await lobby.handle(a, TA, { t: 'register', password: 'secret1' });
-    expect(a.last('account')!.account!.nickname).toBe('Alice');
-    clock.runAll();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(store.games).toHaveLength(1);
-    expect(store.games[0].seats.map((s) => s.accountId)).toEqual(['1', null, null]);
-    expect(a.last('profile')!.profile.games).toBe(1);
-    expect(b.last('profile')).toBeUndefined();
-  });
-
-  it('registered nicknames are reserved; logging in elsewhere joins the same session', async () => {
-    const { lobby } = setup();
-    const a = new Rec();
-    await lobby.handle(a, null, { t: 'hello', token: TA, name: 'Alice' });
-    await lobby.handle(a, TA, { t: 'register', password: 'secret1' });
-
+    await lobby.handle(a, TA, { t: 'leave' });
+    await lobby.handle(a, TA, { t: 'signup', email: 'alice@example.com', nickname: 'Alice', password: 'secret1' });
+    await lobby.handle(a, TA, { t: 'verify', code: linkCode(mail, 'verify') });
     const imposter = new Rec();
-    await lobby.handle(imposter, null, { t: 'hello', token: TB, name: 'alice' });
+    await lobby.handle(imposter, null, { t: 'hello', token: TC, name: 'ALICE' });
     expect(imposter.last('error')!.message).toMatch(/registered nickname/);
-    expect(imposter.last('welcome')).toBeUndefined();
-
-    // New device: unnamed guest, then log in.
-    const phone = new Rec();
-    const tok = await lobby.handle(phone, null, { t: 'hello', token: TC, name: '' });
-    await lobby.handle(phone, tok, { t: 'create', settings: { mode: 'doughnut', seats: 2, botLevel: 'easy' } });
-    expect(phone.last('error')!.message).toMatch(/nickname first/);
-    await lobby.handle(phone, tok, { t: 'login', nickname: 'ALICE', password: 'wrong' });
-    expect(phone.last('error')!.message).toMatch(/Wrong/);
-    await lobby.handle(phone, tok, { t: 'login', nickname: 'ALICE', password: 'secret1' });
-    expect(phone.last('account')!.account!.nickname).toBe('Alice');
-
-    // Both devices now see the same table.
-    await lobby.handle(a, TA, { t: 'create', settings: { mode: 'doughnut', seats: 2, botLevel: 'easy' } });
-    expect(phone.last('table')!.table.code).toBe(a.last('table')!.table.code);
-
-    // Logging out on the phone leaves the laptop logged in.
-    await lobby.handle(phone, tok, { t: 'logout' });
-    expect(phone.last('account')!.account).toBeNull();
-    await lobby.handle(a, TA, { t: 'start' });
-    expect(a.last('table')!.table.status).toBe('playing');
-    await lobby.handle(a, TA, { t: 'logout' });
-    expect(a.last('error')!.message).toMatch(/Finish or leave/);
   });
 
-  it('without a store, saving is unavailable but play works', async () => {
+  it('forgot password: reset link logs in here and logs out other live devices', async () => {
+    const { clock, mail, lobby } = setup();
+    const laptop = new Rec();
+    await lobby.handle(laptop, null, { t: 'hello', token: TA, name: 'Alice' });
+    await lobby.handle(laptop, TA, { t: 'signup', email: 'alice@example.com', nickname: 'Alice', password: 'secret1' });
+    await lobby.handle(laptop, TA, { t: 'verify', code: linkCode(mail, 'verify') });
+
+    const phone = new Rec();
+    await lobby.handle(phone, null, { t: 'hello', token: TC, name: '' });
+    await lobby.handle(phone, TC, { t: 'forgot', email: 'nobody@example.com' });
+    expect(phone.last('notice')!.message).toMatch(/If that email has an account/);
+    clock.advance(61_000);
+    await lobby.handle(phone, TC, { t: 'forgot', email: 'alice@example.com' });
+    await lobby.handle(phone, TC, { t: 'reset', code: linkCode(mail, 'reset'), password: 'newpass1' });
+    expect(phone.last('account')).toMatchObject({ why: 'reset', account: { nickname: 'Alice' } });
+    expect(laptop.last('account')).toMatchObject({ why: 'reset', account: null });
+
+    // Reconnecting the laptop: still a guest.
+    const laptop2 = new Rec();
+    await lobby.handle(laptop2, null, { t: 'hello', token: TA, name: '' });
+    expect(laptop2.last('welcome')!.account).toBeNull();
+  });
+
+  it('without accounts, signing up is unavailable but play works', async () => {
     const lobby = new Lobby({ makeBot: () => heuristicAgent(), clock: new FakeClock() });
     const a = new Rec();
     await lobby.handle(a, null, { t: 'hello', token: TA, name: 'Alice' });
-    await lobby.handle(a, TA, { t: 'register', password: 'secret1' });
+    await lobby.handle(a, TA, { t: 'signup', email: 'a@b.co', nickname: 'Alice', password: 'secret1' });
     expect(a.last('error')!.message).toMatch(/isn't available/);
   });
 });

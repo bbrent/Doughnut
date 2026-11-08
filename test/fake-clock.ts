@@ -30,8 +30,9 @@ export class FakeClock implements Clock {
     }
     this.t = end;
   }
-  /** Run until nothing is scheduled or a limit is hit. */
+  /** Run until nothing is scheduled, or `limitMs` from now has passed. */
   runAll(limitMs = 1e9) {
-    while (this.timers.length && this.t < limitMs) this.advance(Math.max(1, this.timers[0].at - this.t));
+    const end = this.t + limitMs;
+    while (this.timers.length && this.t < end) this.advance(Math.max(1, Math.min(...this.timers.map((x) => x.at)) - this.t));
   }
 }

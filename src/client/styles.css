@@ -144,3 +144,5 @@ details summary { cursor: pointer; }
 .robot-inline { vertical-align: -3px; }
 .robot-inline .robot-body { fill: #4f9a8a; }
 .robot-inline .robot-line { stroke: #4f9a8a; }
+
+.notice { background: color-mix(in srgb, var(--accent) 12%, var(--panel)); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 10px; padding: 10px 12px; }

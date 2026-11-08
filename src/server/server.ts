@@ -12,7 +12,9 @@ import type { ClientMessage } from '../game/protocol';
 import type { TableDeps } from '../game/table';
 import { loadModel } from '../ml/dmc';
 import type { Mlp } from '../ml/mlp';
-import { MemoryStore, type Store } from './store';
+import { AccountService } from './accounts';
+import { LogMailer } from './mailer';
+import { MemoryRepo } from './store';
 
 const TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -32,8 +34,8 @@ export interface ServerOptions {
   modelPath?: string;
   lobby?: Partial<LobbyOptions>;
   table?: Omit<TableDeps, 'onChange' | 'onGameOver' | 'makeBot'>;
-  /** Players, games and ratings. Must already be initialised. Defaults to in-memory. */
-  store?: Store;
+  /** Accounts, games and ratings. Must already be initialised. Defaults to in-memory, emails logged. */
+  store?: AccountService;
 }
 
 export function loadNet(path?: string): Mlp | null {
@@ -48,7 +50,7 @@ export function loadNet(path?: string): Mlp | null {
 
 export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby; close: () => Promise<void> } {
   const net = loadNet(opts.modelPath);
-  const store = opts.store ?? new MemoryStore();
+  const store = opts.store ?? new AccountService(new MemoryRepo(), new LogMailer(), { publicUrl: `http://localhost:${opts.port}` });
   const lobby = new Lobby({ ...opts.table, makeBot: botFactory(net) }, opts.lobby, store);
   const root = resolve(opts.publicDir);
 
@@ -56,7 +58,7 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
     const url = new URL(req.url ?? '/', 'http://x');
     if (url.pathname === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, tables: lobby.tableCount, model: net !== null, store: store.constructor.name }));
+      res.end(JSON.stringify({ ok: true, tables: lobby.tableCount, model: net !== null, store: store.repo.constructor.name }));
       return;
     }
     if (url.pathname === '/api/leaderboard') {

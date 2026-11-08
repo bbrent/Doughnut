@@ -72,10 +72,17 @@ export interface AccountView {
 
 export type ClientMessage =
   | { t: 'hello'; token: string; name: string }
-  /** Save the current nickname with a password (guest -> account). */
-  | { t: 'register'; password: string }
-  | { t: 'login'; nickname: string; password: string }
+  /** Sign up: a confirmation link is emailed; until then you stay a guest. */
+  | { t: 'signup'; email: string; nickname: string; password: string }
+  | { t: 'resend'; email: string }
+  /** The code from a confirmation link. */
+  | { t: 'verify'; code: string }
+  /** `login` is an email address or a nickname. */
+  | { t: 'login'; login: string; password: string }
   | { t: 'logout' }
+  | { t: 'forgot'; email: string }
+  /** The code from a reset link, with the new password. */
+  | { t: 'reset'; code: string; password: string }
   | { t: 'create'; settings: TableSettings }
   | { t: 'join'; code: string }
   | { t: 'quick'; mode: string }
@@ -85,8 +92,10 @@ export type ClientMessage =
 
 export type ServerMessage =
   | { t: 'welcome'; name: string; account: AccountView | null }
-  /** Sent after register / login / logout. */
-  | { t: 'account'; name: string; account: AccountView | null }
+  /** Sent after login / email confirmed / password reset / logout. */
+  | { t: 'account'; name: string; account: AccountView | null; why: 'login' | 'verified' | 'reset' | 'logout' }
+  /** Information for the account forms ("check your email"). */
+  | { t: 'notice'; kind: 'signup' | 'reset'; message: string }
   | { t: 'profile'; profile: Profile; ratingChange: number | null }
   | { t: 'table'; table: TableView }
   | { t: 'left' }

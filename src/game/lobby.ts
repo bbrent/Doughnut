@@ -41,10 +41,20 @@ export interface Accounts {
   /** The account this browser token is logged in to, if any. */
   sessionAccount(token: string): Promise<AccountInfo | null>;
   isRegistered(nickname: string): Promise<boolean>;
-  /** Save `nickname` with a password and log this token in to it. */
-  register(token: string, nickname: string, password: string): Promise<AccountInfo>;
-  login(token: string, nickname: string, password: string): Promise<AccountInfo>;
+  /**
+   * Start a sign-up and email a confirmation link. Returns the pending account
+   * id, or null if the email already had an account (its owner is emailed).
+   */
+  signup(token: string, email: string, nickname: string, password: string): Promise<string | null>;
+  resendVerification(email: string): Promise<void>;
+  /** Confirm an email from its link; logs this token in. */
+  verifyEmail(token: string, code: string): Promise<AccountInfo>;
+  /** Log in with email or nickname. */
+  login(token: string, login: string, password: string): Promise<AccountInfo>;
   logout(token: string): Promise<void>;
+  requestPasswordReset(email: string): Promise<void>;
+  /** Set a new password from a reset link; logs out other browsers, logs this one in. */
+  resetPassword(token: string, code: string, password: string): Promise<AccountInfo>;
   /** Record a finished game; returns updated profiles by account id. */
   recordGame(record: GameRecord): Promise<Map<string, { profile: Profile; ratingChange: number | null }>>;
 }
@@ -69,6 +79,8 @@ export function cleanNickname(name: string): string {
 export class Lobby {
   private sessions = new Map<string, Session>(); // by token
   private byAccount = new Map<string, Session>();
+  /** Sessions waiting for their sign-up to be confirmed, by pending account id. */
+  private pendingSignup = new Map<string, Session>();
   private tables = new Map<string, Table>();
   private members = new Map<Table, Set<Session>>();
   private queue: { session: Session; mode: string; since: number }[] = [];
@@ -103,12 +115,31 @@ export class Lobby {
       if (!token) throw new TableError('Say hello first');
       const s = this.sessions.get(token)!;
       switch (msg.t) {
-        case 'register':
-          await this.register(s, token, msg.password);
+        case 'signup':
+          await this.signup(s, token, msg.email, msg.nickname, msg.password);
+          break;
+        case 'resend':
+          await this.requireAccounts().resendVerification(msg.email);
+          client.send({ t: 'notice', kind: 'signup', message: 'If that email is waiting to be confirmed, we sent the link again.' });
+          break;
+        case 'verify':
+          await this.attach(s, token, await this.requireAccounts().verifyEmail(token, msg.code), 'verified');
           break;
         case 'login':
-          await this.login(s, token, msg.nickname, msg.password);
+          if (s.user.accountId) throw new AccountError('Log out first');
+          if (this.inGame(s)) throw new AccountError('Finish or leave your game before logging in');
+          await this.attach(s, token, await this.requireAccounts().login(token, msg.login, msg.password), 'login');
           break;
+        case 'forgot':
+          await this.requireAccounts().requestPasswordReset(msg.email);
+          client.send({ t: 'notice', kind: 'reset', message: "If that email has an account, we've sent a link to choose a new password. It works for 1 hour." });
+          break;
+        case 'reset': {
+          const acct = await this.requireAccounts().resetPassword(token, msg.code, msg.password);
+          this.dropOtherDevices(acct.id, token);
+          await this.attach(this.sessions.get(token)!, token, acct, 'reset');
+          break;
+        }
         case 'logout':
           await this.logout(s, token);
           break;
@@ -225,43 +256,89 @@ export class Lobby {
   }
 
   /** Guest -> account: save the current nickname with a password. */
-  private async register(s: Session, token: string, password: string): Promise<void> {
-    if (s.user.accountId) throw new AccountError("You're already registered");
-    this.requireName(s);
-    const acct = await this.requireAccounts().register(token, s.user.name, password);
-    s.user.accountId = acct.id; // same User object, so a game in progress gets recorded for the account
-    s.user.name = acct.nickname;
-    s.account = { nickname: acct.nickname, profile: acct.profile };
-    this.byAccount.set(acct.id, s);
-    this.send(s, { t: 'account', name: s.user.name, account: s.account });
-    if (s.table) this.push(s.table);
+  /** Start a sign-up; this browser becomes the account once the email is confirmed. */
+  private async signup(s: Session, token: string, email: string, nickname: string, password: string): Promise<void> {
+    if (s.user.accountId) throw new AccountError("You're already signed up");
+    const pending = await this.requireAccounts().signup(token, email, nickname, password);
+    if (pending) this.pendingSignup.set(pending, s);
+    this.send(s, {
+      t: 'notice',
+      kind: 'signup',
+      message: `Check your email (${email.trim()}) for a link to confirm your account. Until then you're playing as a guest.`,
+    });
   }
 
-  private async login(s: Session, token: string, nickname: string, password: string): Promise<void> {
-    if (s.user.accountId) throw new AccountError('Log out first');
-    if (this.inGame(s)) throw new AccountError('Finish or leave your game before logging in');
-    const acct = await this.requireAccounts().login(token, cleanNickname(nickname), password);
+  /**
+   * Make this browser's session the given account. If the account is already
+   * live in another session (another device), this browser joins it.
+   */
+  private async attach(s: Session, token: string, acct: AccountInfo, why: 'login' | 'verified' | 'reset'): Promise<void> {
     const view = { nickname: acct.nickname, profile: acct.profile };
     const existing = this.byAccount.get(acct.id);
-    // This browser's clients (all tabs share the token) move to the account's session.
     const mine = [...s.clients].filter(([, tok]) => tok === token).map(([c]) => c);
     if (existing && existing !== s) {
+      if (this.inGame(s)) throw new AccountError('Finish or leave your game first');
       this.leave(s, true);
       for (const c of mine) {
         s.clients.delete(c);
         existing.clients.set(c, token);
       }
       this.sessions.set(token, existing);
-      for (const c of mine) c.send({ t: 'account', name: existing.user.name, account: existing.account });
+      for (const c of mine) c.send({ t: 'account', name: existing.user.name, account: existing.account, why });
       if (existing.table) this.push(existing.table);
       else for (const c of mine) c.send({ t: 'left' });
-    } else {
-      s.user.accountId = acct.id;
-      s.user.name = acct.nickname;
-      s.account = view;
-      this.byAccount.set(acct.id, s);
-      this.send(s, { t: 'account', name: s.user.name, account: s.account });
-      if (s.table) this.push(s.table);
+      return;
+    }
+    if (s.user.accountId && s.user.accountId !== acct.id) throw new AccountError('Log out first');
+    // Same User object, so a game in progress is recorded for the account.
+    s.user.accountId = acct.id;
+    if (!this.inGame(s)) s.user.name = acct.nickname;
+    s.account = view;
+    this.byAccount.set(acct.id, s);
+    this.send(s, { t: 'account', name: s.user.name, account: s.account, why });
+    if (s.table) this.push(s.table);
+    // The browser that signed up is logged in too, if it's still here.
+    const signedUpFrom = this.pendingSignup.get(acct.id);
+    this.pendingSignup.delete(acct.id);
+    if (signedUpFrom && signedUpFrom !== s && !signedUpFrom.user.accountId) {
+      const tok = [...this.sessions].find(([, v]) => v === signedUpFrom)?.[0];
+      if (tok) await this.attachPending(signedUpFrom, tok, s);
+    }
+  }
+
+  /** Move the session that signed up onto the now-confirmed account's session. */
+  private async attachPending(from: Session, token: string, to: Session): Promise<void> {
+    if (this.inGame(from)) {
+      // Mid-game: the account takes over this seat directly instead.
+      from.user.accountId = to.user.accountId;
+      from.account = to.account;
+      this.send(from, { t: 'account', name: from.user.name, account: from.account, why: 'verified' });
+      return;
+    }
+    this.leave(from, true);
+    for (const [c, tok] of from.clients) to.clients.set(c, tok);
+    this.sessions.set(token, to);
+    for (const c of from.clients.keys()) {
+      c.send({ t: 'account', name: to.user.name, account: to.account, why: 'verified' });
+      c.send({ t: 'left' });
+    }
+    from.clients.clear();
+  }
+
+  /** After a password reset: every other browser on this account becomes a guest. */
+  private dropOtherDevices(accountId: string, keepToken: string): void {
+    const s = this.byAccount.get(accountId);
+    if (!s) return;
+    for (const [tok, sess] of [...this.sessions]) {
+      if (sess !== s || tok === keepToken) continue;
+      const theirs = [...s.clients].filter(([, t]) => t === tok).map(([c]) => c);
+      const guest = this.newSession(this.guestUser('Guest'), null);
+      for (const c of theirs) {
+        s.clients.delete(c);
+        guest.clients.set(c, tok);
+        c.send({ t: 'account', name: '', account: null, why: 'reset' });
+      }
+      this.sessions.set(tok, guest);
     }
   }
 
@@ -281,7 +358,7 @@ export class Lobby {
     for (const c of mine) guest.clients.set(c, token);
     this.sessions.set(token, guest);
     for (const c of mine) {
-      c.send({ t: 'account', name: '', account: null });
+      c.send({ t: 'account', name: '', account: null, why: 'logout' });
       c.send({ t: 'left' });
     }
   }
@@ -398,10 +475,11 @@ export class Lobby {
     this.accounts
       .recordGame(rec)
       .then((updates) => {
-        for (const [id, u] of updates) {
-          const s = this.byAccount.get(id);
-          if (!s) continue;
-          s.account = { nickname: s.user.name, profile: u.profile };
+        // Every live session on the account (e.g. a device that confirmed mid-game).
+        for (const s of new Set(this.sessions.values())) {
+          const u = s.user.accountId ? updates.get(s.user.accountId) : undefined;
+          if (!u) continue;
+          s.account = { nickname: s.account?.nickname ?? s.user.name, profile: u.profile };
           this.send(s, { t: 'profile', profile: u.profile, ratingChange: u.ratingChange });
         }
       })

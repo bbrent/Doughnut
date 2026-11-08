@@ -17,6 +17,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/nodemailer": "^8.0.2",
     "@types/ws": "^8.18.2",
     "esbuild": "^0.25.12",
     "tsx": "^4.19.0",
@@ -25,6 +26,7 @@
   },
   "dependencies": {
     "mysql2": "^3.24.6",
+    "nodemailer": "~10.2.1",
     "openskill": "^4.1.1",
     "ws": "^8.22.1"
   }

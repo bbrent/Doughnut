@@ -1,13 +1,13 @@
 /**
- * Persistence: accounts (nickname + password), browser sessions, finished
- * games and OpenSkill ratings. Guests are never stored. MySqlStore for
- * production; MemoryStore when no database is configured (and for tests).
+ * Data access: accounts, browser sessions, one-time email links, finished
+ * games and ratings. MySqlRepo for production; MemoryRepo when no database is
+ * configured (and for tests). The sign-up / login / recovery rules live in
+ * accounts.ts on top of this.
  */
 import { createHash } from 'node:crypto';
 import { ordinal, rate, rating } from 'openskill';
-import { AccountError, cleanNickname, type AccountInfo, type Accounts } from '../game/lobby';
+import { cleanNickname } from '../game/lobby';
 import type { GameRecord, Profile } from '../game/protocol';
-import { LoginThrottle, checkNewPassword, hashPassword, verifyPassword } from './password';
 
 export interface LeaderRow {
   name: string;
@@ -16,16 +16,14 @@ export interface LeaderRow {
   wins: number;
 }
 
-export interface Store extends Accounts {
-  init(): Promise<void>;
-  leaderboard(limit: number): Promise<LeaderRow[]>;
-  close(): Promise<void>;
-}
-
-interface PlayerRow {
+export interface PlayerRow {
   id: number;
+  email: string | null;
   nickname: string;
   password_hash: string;
+  /** null until the email address is confirmed. */
+  verified_at: Date | null;
+  created_at: Date;
   mu: number;
   sigma: number;
   games: number;
@@ -33,17 +31,51 @@ interface PlayerRow {
   rated_games: number;
 }
 
+export type LinkPurpose = 'verify' | 'reset';
+
+export interface NewAccount {
+  email: string;
+  nickname: string;
+  passwordHash: string;
+}
+
+export interface Repo {
+  init(): Promise<void>;
+  close(): Promise<void>;
+  byId(id: number): Promise<PlayerRow | null>;
+  byEmail(email: string): Promise<PlayerRow | null>;
+  byNickname(nickname: string): Promise<PlayerRow | null>;
+  /** Returns the new id, or which unique field clashed. */
+  createAccount(a: NewAccount): Promise<number | 'email' | 'nickname'>;
+  deleteAccount(id: number): Promise<void>;
+  /** Remove accounts never verified within `maxAgeMs`, freeing their email and nickname. */
+  purgeUnverified(maxAgeMs: number): Promise<void>;
+  markVerified(id: number): Promise<void>;
+  setPassword(id: number, hash: string): Promise<void>;
+  sessionPlayer(tokenHash: string): Promise<PlayerRow | null>;
+  linkSession(tokenHash: string, playerId: number): Promise<void>;
+  unlinkSession(tokenHash: string): Promise<void>;
+  unlinkAllSessions(playerId: number): Promise<void>;
+  addLink(codeHash: string, playerId: number, purpose: LinkPurpose, expiresAt: Date): Promise<void>;
+  /** Use a link once: returns its player if valid, unused and unexpired. */
+  consumeLink(codeHash: string, purpose: LinkPurpose): Promise<number | null>;
+  /** Invalidate a player's unused links of one kind (e.g. after a reset). */
+  dropLinks(playerId: number, purpose: LinkPurpose): Promise<void>;
+  recordGame(rec: GameRecord): Promise<Map<string, { profile: Profile; ratingChange: number | null }>>;
+  leaderboard(limit: number): Promise<LeaderRow[]>;
+}
+
 const DEFAULT = rating();
-export const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
+export const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 export const nicknameKey = (n: string) => cleanNickname(n).toLowerCase();
+export const emailKey = (e: string) => e.trim().toLowerCase();
 
 /** Display rating: conservative estimate (mu - 3 sigma), 1000 for a new player. */
 export const displayRating = (mu: number, sigma: number) => Math.round(1000 + 40 * ordinal({ mu, sigma }));
 
-function profileOf(p: PlayerRow): Profile {
+export function profileOf(p: PlayerRow): Profile {
   return { name: p.nickname, rating: displayRating(p.mu, p.sigma), games: p.games, wins: p.wins };
 }
-const info = (p: PlayerRow): AccountInfo => ({ id: String(p.id), nickname: p.nickname, profile: profileOf(p) });
 
 /**
  * Places for a finished game: lower score is better, equal scores share a
@@ -67,7 +99,7 @@ export function rateGame(rec: GameRecord, current: Map<number, { mu: number; sig
   return new Map(seats.map((i, k) => [i, out[k][0]]));
 }
 
-/** Apply a finished game to account rows (mutates them). Shared by both stores. */
+/** Apply a finished game to account rows (mutates them). Shared by both repos. */
 function applyGame(rec: GameRecord, rows: Map<number, PlayerRow>) {
   const rated = rateGame(rec, new Map([...rows].map(([i, p]) => [i, { mu: p.mu, sigma: p.sigma }])));
   const pl = places(rec);
@@ -95,89 +127,110 @@ function applyGame(rec: GameRecord, rows: Map<number, PlayerRow>) {
   return { rated: !!rated, seats, updates };
 }
 
-function validateRegistration(nickname: string, password: string) {
-  const n = cleanNickname(nickname);
-  if (n.length < 2) throw new AccountError('Pick a nickname of at least 2 characters');
-  if (/^guest$/i.test(n)) throw new AccountError(`"${n}" can't be registered. Pick another nickname.`);
-  const bad = checkNewPassword(password);
-  if (bad) throw new AccountError(bad);
-}
-
-const WRONG = 'Wrong nickname or password';
+/** Only verified accounts' games are recorded. */
+const verifiedRows = async (rec: GameRecord, load: (id: number) => Promise<PlayerRow | null>) => {
+  const rows = new Map<number, PlayerRow>();
+  for (const i of accountSeats(rec)) {
+    const p = await load(Number(rec.seats[i].accountId));
+    if (p?.verified_at) rows.set(i, p);
+  }
+  return rows;
+};
 
 // ---- in memory -------------------------------------------------------------
 
-export class MemoryStore implements Store {
-  private byKey = new Map<string, PlayerRow>();
-  private byId = new Map<number, PlayerRow>();
-  private sessions = new Map<string, number>(); // token hash -> player id
-  private throttle = new LoginThrottle();
+export class MemoryRepo implements Repo {
+  private players = new Map<number, PlayerRow>();
+  private sessions = new Map<string, number>();
+  private links = new Map<string, { playerId: number; purpose: LinkPurpose; expiresAt: Date; used: boolean }>();
+  private nextId = 1;
   games: GameRecord[] = [];
+
+  constructor(private readonly now: () => number = Date.now) {}
 
   async init() {}
   async close() {}
 
-  async sessionAccount(token: string) {
-    const id = this.sessions.get(hashToken(token));
-    const p = id === undefined ? undefined : this.byId.get(id);
-    return p ? info(p) : null;
+  async byId(id: number) {
+    return this.players.get(id) ?? null;
   }
-
-  async isRegistered(nickname: string) {
-    return this.byKey.has(nicknameKey(nickname));
+  async byEmail(email: string) {
+    const k = emailKey(email);
+    return [...this.players.values()].find((p) => p.email !== null && emailKey(p.email) === k) ?? null;
   }
-
-  async register(token: string, nickname: string, password: string) {
-    validateRegistration(nickname, password);
-    const key = nicknameKey(nickname);
-    if (this.byKey.has(key)) throw new AccountError('That nickname is already registered');
-    const p: PlayerRow = {
-      id: this.byId.size + 1,
-      nickname: cleanNickname(nickname),
-      password_hash: await hashPassword(password),
+  async byNickname(nickname: string) {
+    const k = nicknameKey(nickname);
+    return [...this.players.values()].find((p) => nicknameKey(p.nickname) === k) ?? null;
+  }
+  async createAccount(a: NewAccount) {
+    if (await this.byEmail(a.email)) return 'email' as const;
+    if (await this.byNickname(a.nickname)) return 'nickname' as const;
+    const id = this.nextId++;
+    this.players.set(id, {
+      id,
+      email: a.email.trim(),
+      nickname: cleanNickname(a.nickname),
+      password_hash: a.passwordHash,
+      verified_at: null,
+      created_at: new Date(this.now()),
       mu: DEFAULT.mu,
       sigma: DEFAULT.sigma,
       games: 0,
       wins: 0,
       rated_games: 0,
-    };
-    if (this.byKey.has(key)) throw new AccountError('That nickname is already registered');
-    this.byKey.set(key, p);
-    this.byId.set(p.id, p);
-    this.sessions.set(hashToken(token), p.id);
-    return info(p);
+    });
+    return id;
   }
-
-  async login(token: string, nickname: string, password: string) {
-    const key = nicknameKey(nickname);
-    const wait = this.throttle.check(key);
-    if (wait) throw new AccountError(`Too many attempts. Try again in ${wait} s.`);
-    const p = this.byKey.get(key);
-    if (!p || !(await verifyPassword(password, p.password_hash))) {
-      this.throttle.fail(key);
-      throw new AccountError(WRONG);
+  async deleteAccount(id: number) {
+    this.players.delete(id);
+    for (const [k, v] of this.sessions) if (v === id) this.sessions.delete(k);
+  }
+  async purgeUnverified(maxAgeMs: number) {
+    for (const p of [...this.players.values()]) {
+      if (!p.verified_at && this.now() - p.created_at.getTime() > maxAgeMs) await this.deleteAccount(p.id);
     }
-    this.throttle.success(key);
-    this.sessions.set(hashToken(token), p.id);
-    return info(p);
   }
-
-  async logout(token: string) {
-    this.sessions.delete(hashToken(token));
+  async markVerified(id: number) {
+    const p = this.players.get(id);
+    if (p && !p.verified_at) p.verified_at = new Date(this.now());
   }
-
+  async setPassword(id: number, hash: string) {
+    const p = this.players.get(id);
+    if (p) p.password_hash = hash;
+  }
+  async sessionPlayer(tokenHash: string) {
+    const id = this.sessions.get(tokenHash);
+    return id === undefined ? null : (this.players.get(id) ?? null);
+  }
+  async linkSession(tokenHash: string, playerId: number) {
+    this.sessions.set(tokenHash, playerId);
+  }
+  async unlinkSession(tokenHash: string) {
+    this.sessions.delete(tokenHash);
+  }
+  async unlinkAllSessions(playerId: number) {
+    for (const [k, v] of this.sessions) if (v === playerId) this.sessions.delete(k);
+  }
+  async addLink(codeHash: string, playerId: number, purpose: LinkPurpose, expiresAt: Date) {
+    this.links.set(codeHash, { playerId, purpose, expiresAt, used: false });
+  }
+  async consumeLink(codeHash: string, purpose: LinkPurpose) {
+    const l = this.links.get(codeHash);
+    if (!l || l.used || l.purpose !== purpose || l.expiresAt.getTime() < this.now() || !this.players.has(l.playerId)) return null;
+    l.used = true;
+    return l.playerId;
+  }
+  async dropLinks(playerId: number, purpose: LinkPurpose) {
+    for (const l of this.links.values()) if (l.playerId === playerId && l.purpose === purpose) l.used = true;
+  }
   async recordGame(rec: GameRecord) {
+    const rows = await verifiedRows(rec, (id) => this.byId(id));
+    if (!rows.size) return new Map();
     this.games.push(rec);
-    const rows = new Map<number, PlayerRow>();
-    for (const i of accountSeats(rec)) {
-      const p = this.byId.get(Number(rec.seats[i].accountId));
-      if (p) rows.set(i, p);
-    }
     return applyGame(rec, rows).updates;
   }
-
   async leaderboard(limit: number) {
-    return [...this.byId.values()]
+    return [...this.players.values()]
       .filter((p) => p.rated_games > 0)
       .map((p) => ({ name: p.nickname, rating: displayRating(p.mu, p.sigma), games: p.games, wins: p.wins }))
       .sort((a, b) => b.rating - a.rating)
@@ -190,9 +243,12 @@ export class MemoryStore implements Store {
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS players (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    email VARCHAR(254) NULL,
+    email_key VARCHAR(254) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL,
     nickname VARCHAR(20) NOT NULL,
     nickname_key VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
+    verified_at DATETIME NULL,
     mu DOUBLE NOT NULL,
     sigma DOUBLE NOT NULL,
     games INT UNSIGNED NOT NULL DEFAULT 0,
@@ -201,6 +257,7 @@ const SCHEMA = [
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_login TIMESTAMP NULL,
     UNIQUE KEY uq_nickname (nickname_key),
+    UNIQUE KEY uq_email (email_key),
     KEY ix_rating (rated_games, mu)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   `CREATE TABLE IF NOT EXISTS sessions (
@@ -210,6 +267,16 @@ const SCHEMA = [
     last_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     KEY ix_player (player_id),
     CONSTRAINT fk_session_player FOREIGN KEY (player_id) REFERENCES players (id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  `CREATE TABLE IF NOT EXISTS email_links (
+    code_hash CHAR(64) NOT NULL PRIMARY KEY,
+    player_id INT UNSIGNED NOT NULL,
+    purpose ENUM('verify', 'reset') NOT NULL,
+    expires_at DATETIME NOT NULL,
+    used_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_player (player_id),
+    CONSTRAINT fk_link_player FOREIGN KEY (player_id) REFERENCES players (id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   `CREATE TABLE IF NOT EXISTS games (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -244,43 +311,55 @@ const SCHEMA = [
 ];
 
 type Pool = import('mysql2/promise').Pool;
+type Queryable = Pick<Pool, 'query' | 'execute'>;
 
-export class MySqlStore implements Store {
+async function columnExists(db: Queryable, table: string, column: string) {
+  const [r] = await db.query(
+    `SELECT COUNT(*) AS n FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
+    [table, column],
+  );
+  return (r as { n: number }[])[0].n > 0;
+}
+
+export class MySqlRepo implements Repo {
   private pool: Pool | null = null;
-  private throttle = new LoginThrottle();
 
   constructor(private readonly config: string | import('mysql2/promise').PoolOptions) {}
 
   private async db(): Promise<Pool> {
     if (!this.pool) {
       const mysql = await import('mysql2/promise');
-      this.pool =
-        typeof this.config === 'string'
-          ? mysql.createPool({ uri: this.config, connectionLimit: 5, charset: 'utf8mb4' })
-          : mysql.createPool({ connectionLimit: 5, charset: 'utf8mb4', ...this.config });
+      const base = { connectionLimit: 5, charset: 'utf8mb4', timezone: 'Z' as const };
+      this.pool = typeof this.config === 'string' ? mysql.createPool({ uri: this.config, ...base }) : mysql.createPool({ ...base, ...this.config });
+      // Work in UTC whatever the server's time zone, so expiry checks line up.
+      this.pool.on('connection', (c) => void c.query("SET time_zone = '+00:00'"));
     }
     return this.pool;
   }
 
   async init() {
     const db = await this.db();
-    // The first version stored a player per browser (players.token_hash). Keep
-    // that data but move it aside: those players never had passwords.
-    const [old] = await db.query(
-      `SELECT COUNT(*) AS n FROM information_schema.columns
-       WHERE table_schema = DATABASE() AND table_name = 'players' AND column_name = 'token_hash'`,
-    );
-    if ((old as { n: number }[])[0].n > 0) {
+    // v1 stored a player per browser (players.token_hash) with no password: keep it aside.
+    if (await columnExists(db, 'players', 'token_hash')) {
       await db.query('RENAME TABLE game_players TO game_players_v1, games TO games_v1, players TO players_v1');
       console.log('Moved first-version tables to *_v1 (guest players without passwords)');
     }
-    // Foreign key names are unique per database: free the old ones for the new
-    // tables (also repairs a migration that stopped part-way).
+    // Foreign key names are unique per database: free the old ones for the new tables.
     const [fks] = await db.query(
       `SELECT constraint_name AS name FROM information_schema.table_constraints
        WHERE table_schema = DATABASE() AND table_name = 'game_players_v1' AND constraint_type = 'FOREIGN KEY'`,
     );
     for (const { name } of fks as { name: string }[]) await db.query(`ALTER TABLE game_players_v1 DROP FOREIGN KEY \`${name}\``);
+    // v2 accounts had a nickname and password but no email: add the columns and treat them as verified.
+    if ((await columnExists(db, 'players', 'nickname')) && !(await columnExists(db, 'players', 'email'))) {
+      await db.query(`ALTER TABLE players
+        ADD COLUMN email VARCHAR(254) NULL AFTER id,
+        ADD COLUMN email_key VARCHAR(254) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL AFTER email,
+        ADD COLUMN verified_at DATETIME NULL AFTER password_hash,
+        ADD UNIQUE KEY uq_email (email_key)`);
+      await db.query('UPDATE players SET verified_at = created_at WHERE verified_at IS NULL');
+      console.log('Added email columns to players (existing accounts log in by nickname)');
+    }
     for (const sql of SCHEMA) await db.query(sql);
   }
 
@@ -289,75 +368,89 @@ export class MySqlStore implements Store {
     this.pool = null;
   }
 
-  private async player(where: string, arg: string | number): Promise<PlayerRow | null> {
-    const db = await this.db();
-    const [rows] = await db.execute(`SELECT * FROM players WHERE ${where}`, [arg]);
+  private async one(sql: string, args: (string | number)[]): Promise<PlayerRow | null> {
+    const [rows] = await (await this.db()).execute(sql, args);
     return (rows as PlayerRow[])[0] ?? null;
   }
 
-  async sessionAccount(token: string) {
-    const db = await this.db();
-    const [rows] = await db.execute(
-      'SELECT p.* FROM sessions s JOIN players p ON p.id = s.player_id WHERE s.token_hash = ?',
-      [hashToken(token)],
-    );
-    const p = (rows as PlayerRow[])[0];
-    if (!p) return null;
-    await db.execute('UPDATE sessions SET last_seen = CURRENT_TIMESTAMP WHERE token_hash = ?', [hashToken(token)]);
-    return info(p);
+  byId(id: number) {
+    return this.one('SELECT * FROM players WHERE id = ?', [id]);
+  }
+  byEmail(email: string) {
+    return this.one('SELECT * FROM players WHERE email_key = ?', [emailKey(email)]);
+  }
+  byNickname(nickname: string) {
+    return this.one('SELECT * FROM players WHERE nickname_key = ?', [nicknameKey(nickname)]);
   }
 
-  async isRegistered(nickname: string) {
-    return (await this.player('nickname_key = ?', nicknameKey(nickname))) !== null;
+  async createAccount(a: NewAccount) {
+    try {
+      const [res] = await (await this.db()).execute(
+        `INSERT INTO players (email, email_key, nickname, nickname_key, password_hash, mu, sigma) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [a.email.trim(), emailKey(a.email), cleanNickname(a.nickname), nicknameKey(a.nickname), a.passwordHash, DEFAULT.mu, DEFAULT.sigma],
+      );
+      return (res as { insertId: number }).insertId;
+    } catch (e) {
+      const err = e as { code?: string; message?: string };
+      if (err.code === 'ER_DUP_ENTRY') return err.message?.includes('uq_email') ? ('email' as const) : ('nickname' as const);
+      throw e;
+    }
   }
-
-  private async linkSession(token: string, playerId: number) {
+  async deleteAccount(id: number) {
+    await (await this.db()).execute('DELETE FROM players WHERE id = ?', [id]);
+  }
+  async purgeUnverified(maxAgeMs: number) {
+    await (await this.db()).execute('DELETE FROM players WHERE verified_at IS NULL AND created_at < ?', [new Date(Date.now() - maxAgeMs)]);
+  }
+  async markVerified(id: number) {
+    await (await this.db()).execute('UPDATE players SET verified_at = COALESCE(verified_at, UTC_TIMESTAMP()) WHERE id = ?', [id]);
+  }
+  async setPassword(id: number, hash: string) {
+    await (await this.db()).execute('UPDATE players SET password_hash = ? WHERE id = ?', [hash, id]);
+  }
+  async sessionPlayer(tokenHash: string) {
+    const p = await this.one('SELECT p.* FROM sessions s JOIN players p ON p.id = s.player_id WHERE s.token_hash = ?', [tokenHash]);
+    if (p) await (await this.db()).execute('UPDATE sessions SET last_seen = CURRENT_TIMESTAMP WHERE token_hash = ?', [tokenHash]);
+    return p;
+  }
+  async linkSession(tokenHash: string, playerId: number) {
     const db = await this.db();
     await db.execute(
       'INSERT INTO sessions (token_hash, player_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE player_id = VALUES(player_id), last_seen = CURRENT_TIMESTAMP',
-      [hashToken(token), playerId],
+      [tokenHash, playerId],
     );
     await db.execute('UPDATE players SET last_login = CURRENT_TIMESTAMP WHERE id = ?', [playerId]);
   }
-
-  async register(token: string, nickname: string, password: string) {
-    validateRegistration(nickname, password);
-    const db = await this.db();
-    const hash = await hashPassword(password);
-    try {
-      await db.execute('INSERT INTO players (nickname, nickname_key, password_hash, mu, sigma) VALUES (?, ?, ?, ?, ?)', [
-        cleanNickname(nickname),
-        nicknameKey(nickname),
-        hash,
-        DEFAULT.mu,
-        DEFAULT.sigma,
-      ]);
-    } catch (e) {
-      if ((e as { code?: string }).code === 'ER_DUP_ENTRY') throw new AccountError('That nickname is already registered');
-      throw e;
-    }
-    const p = (await this.player('nickname_key = ?', nicknameKey(nickname)))!;
-    await this.linkSession(token, p.id);
-    return info(p);
+  async unlinkSession(tokenHash: string) {
+    await (await this.db()).execute('DELETE FROM sessions WHERE token_hash = ?', [tokenHash]);
   }
-
-  async login(token: string, nickname: string, password: string) {
-    const key = nicknameKey(nickname);
-    const wait = this.throttle.check(key);
-    if (wait) throw new AccountError(`Too many attempts. Try again in ${wait} s.`);
-    const p = await this.player('nickname_key = ?', key);
-    if (!p || !(await verifyPassword(password, p.password_hash))) {
-      this.throttle.fail(key);
-      throw new AccountError(WRONG);
-    }
-    this.throttle.success(key);
-    await this.linkSession(token, p.id);
-    return info(p);
+  async unlinkAllSessions(playerId: number) {
+    await (await this.db()).execute('DELETE FROM sessions WHERE player_id = ?', [playerId]);
   }
-
-  async logout(token: string) {
+  async addLink(codeHash: string, playerId: number, purpose: LinkPurpose, expiresAt: Date) {
+    await (await this.db()).execute('INSERT INTO email_links (code_hash, player_id, purpose, expires_at) VALUES (?, ?, ?, ?)', [
+      codeHash,
+      playerId,
+      purpose,
+      expiresAt,
+    ]);
+  }
+  async consumeLink(codeHash: string, purpose: LinkPurpose) {
     const db = await this.db();
-    await db.execute('DELETE FROM sessions WHERE token_hash = ?', [hashToken(token)]);
+    // Single statement so a link can't be used twice even with concurrent requests.
+    const [res] = await db.execute(
+      'UPDATE email_links SET used_at = UTC_TIMESTAMP() WHERE code_hash = ? AND purpose = ? AND used_at IS NULL AND expires_at > UTC_TIMESTAMP()',
+      [codeHash, purpose],
+    );
+    if ((res as { affectedRows: number }).affectedRows !== 1) return null;
+    const [rows] = await db.execute('SELECT player_id FROM email_links WHERE code_hash = ?', [codeHash]);
+    return (rows as { player_id: number }[])[0]?.player_id ?? null;
+  }
+  async dropLinks(playerId: number, purpose: LinkPurpose) {
+    await (await this.db()).execute('UPDATE email_links SET used_at = UTC_TIMESTAMP() WHERE player_id = ? AND purpose = ? AND used_at IS NULL', [
+      playerId,
+      purpose,
+    ]);
   }
 
   async recordGame(rec: GameRecord) {
@@ -365,17 +458,18 @@ export class MySqlStore implements Store {
     const conn = await db.getConnection();
     try {
       await conn.beginTransaction();
-      const rows = new Map<number, PlayerRow>();
-      for (const i of accountSeats(rec)) {
-        const [r] = await conn.execute('SELECT * FROM players WHERE id = ? FOR UPDATE', [Number(rec.seats[i].accountId)]);
-        const p = (r as PlayerRow[])[0];
-        if (p) rows.set(i, p);
+      const rows = await verifiedRows(rec, async (id) => {
+        const [r] = await conn.execute('SELECT * FROM players WHERE id = ? FOR UPDATE', [id]);
+        return (r as PlayerRow[])[0] ?? null;
+      });
+      if (!rows.size) {
+        await conn.rollback();
+        return new Map();
       }
       const { rated, seats, updates } = applyGame(rec, rows);
       const humans = rec.seats.filter((s) => s.userId).length;
       const [res] = await conn.execute(
-        `INSERT INTO games (table_code, mode, seats, humans, hands, rated, started_at, ended_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO games (table_code, mode, seats, humans, hands, rated, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [rec.code, rec.mode, rec.seats.length, humans, rec.hands, rated ? 1 : 0, new Date(rec.startedAt), new Date(rec.endedAt)],
       );
       const gameId = (res as { insertId: number }).insertId;
@@ -410,26 +504,10 @@ export class MySqlStore implements Store {
   }
 
   async leaderboard(limit: number) {
-    const db = await this.db();
-    const [rows] = await db.query(
-      `SELECT nickname, mu, sigma, games, wins FROM players WHERE rated_games > 0
+    const [rows] = await (await this.db()).query(
+      `SELECT nickname, mu, sigma, games, wins FROM players WHERE rated_games > 0 AND verified_at IS NOT NULL
        ORDER BY (mu - 3 * sigma) DESC LIMIT ${Math.max(1, Math.min(100, Math.floor(limit)))}`,
     );
     return (rows as PlayerRow[]).map((p) => ({ name: p.nickname, rating: displayRating(p.mu, p.sigma), games: p.games, wins: p.wins }));
   }
-}
-
-/** Pick a store from the environment: DATABASE_URL or MYSQL_* variables, else memory. */
-export function storeFromEnv(env: NodeJS.ProcessEnv): Store {
-  if (env.DATABASE_URL) return new MySqlStore(env.DATABASE_URL);
-  if (env.MYSQL_HOST || env.MYSQL_DATABASE) {
-    return new MySqlStore({
-      host: env.MYSQL_HOST ?? 'localhost',
-      port: Number(env.MYSQL_PORT ?? 3306),
-      user: env.MYSQL_USER,
-      password: env.MYSQL_PASSWORD,
-      database: env.MYSQL_DATABASE,
-    });
-  }
-  return new MemoryStore();
 }

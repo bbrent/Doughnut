@@ -36,14 +36,18 @@ const st = {
   table: null as TableView | null,
   queuePos: 0,
   joinCode: new URLSearchParams(location.search).get('t')?.toUpperCase() ?? '',
+  /** From links in emails: ?verify=CODE (confirm sign-up), ?reset=CODE (new password). */
+  verifyCode: new URLSearchParams(location.search).get('verify'),
+  resetCode: new URLSearchParams(location.search).get('reset'),
+  /** "Check your email" message shown in the account panel. */
+  notice: null as { kind: 'signup' | 'reset'; message: string } | null,
+  signupEmail: '',
   /** Signed-in account; null = guest (nothing saved). */
   account: null as AccountView | null,
   /** Which account form is open on the home screen. */
-  authForm: null as 'register' | 'login' | null,
+  authForm: null as 'signup' | 'login' | 'forgot' | 'reset' | null,
   /** The nickname the server last accepted, to know when to re-introduce ourselves. */
   helloName: null as string | null,
-  /** The account action in flight, for the confirmation message. */
-  pendingAuth: null as 'register' | 'login' | null,
   ratingChange: null as number | null,
   leaders: null as { name: string; rating: number; games: number; wins: number }[] | null,
 };
@@ -65,7 +69,7 @@ function toast(msg: string) {
   toastEl.textContent = msg;
   toastEl.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 3000);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), Math.max(3000, msg.length * 60));
 }
 
 function onMessage(m: ServerMessage) {
@@ -77,16 +81,27 @@ function onMessage(m: ServerMessage) {
       if (m.account) setName(m.account.nickname);
       break;
     case 'account': {
-      const action = st.pendingAuth;
-      st.pendingAuth = null;
       st.account = m.account;
       st.helloName = m.name;
       st.authForm = null;
+      st.notice = null;
       setName(m.name);
-      toast(!m.account ? 'Logged out' : action === 'register' ? `Saved. Games as ${m.account.nickname} now count.` : `Logged in as ${m.account.nickname}`);
+      const nick = m.account?.nickname ?? '';
+      toast(
+        {
+          login: `Logged in as ${nick}`,
+          verified: `Email confirmed. Welcome, ${nick}! Your games are saved from now on.`,
+          reset: m.account ? "Password changed. You're logged in." : 'Your password was changed on another device, so you were logged out here.',
+          logout: 'Logged out',
+        }[m.why],
+      );
       loadLeaders();
       break;
     }
+    case 'notice':
+      st.notice = { kind: m.kind, message: m.message };
+      st.authForm = null;
+      break;
     case 'profile':
       if (st.account) st.account.profile = m.profile;
       st.ratingChange = m.ratingChange;
@@ -109,7 +124,6 @@ function onMessage(m: ServerMessage) {
       backHome();
       break;
     case 'error':
-      st.pendingAuth = null;
       // Until the server accepts our nickname, later messages only add "Say hello first".
       if (st.helloName === null && m.message === 'Say hello first') break;
       toast(m.message);
@@ -211,25 +225,50 @@ function identityHtml(): string {
     </div>`;
   }
   const warn = insecure ? '<div class="small bad">This page isn\'t using HTTPS, so a password could be seen on the network.</div>' : '';
+  const buttons = (primary: string, label: string) =>
+    `<div class="row"><button class="primary" data-action="${primary}">${label}</button><button data-action="auth-cancel">Cancel</button></div>`;
   let form = '';
-  if (st.authForm === 'register') {
+  if (st.authForm === 'signup') {
     form = `<div class="stack auth">
-      <div class="small">Choose a password for <strong>${esc(st.name.trim() || 'your nickname')}</strong>. From then on your games and rating are saved, and nobody else can use this nickname.</div>
+      <div class="small">Sign up to keep your games and rating under the nickname above. We'll email you a link to confirm your address.</div>
+      <input id="su-email" type="email" autocomplete="email" maxlength="254" placeholder="Email" value="${esc(st.signupEmail)}" />
       <div class="row">
-        <input id="pw1" type="password" autocomplete="new-password" placeholder="Password (6+ characters)" />
-        <input id="pw2" type="password" autocomplete="new-password" placeholder="Repeat password" />
+        <input id="su-pw1" type="password" autocomplete="new-password" placeholder="Password (6+ characters)" />
+        <input id="su-pw2" type="password" autocomplete="new-password" placeholder="Repeat password" />
       </div>
-      ${warn}
-      <div class="row"><button class="primary" data-action="do-register">Save my nickname</button><button data-action="auth-cancel">Cancel</button></div>
+      ${warn}${buttons('do-signup', 'Sign up')}
     </div>`;
   } else if (st.authForm === 'login') {
     form = `<div class="stack auth">
       <div class="row">
-        <input id="login-nick" autocomplete="username" maxlength="20" placeholder="Nickname" value="${esc(st.name)}" />
-        <input id="login-pw" type="password" autocomplete="current-password" placeholder="Password" />
+        <input id="li-login" autocomplete="username" maxlength="254" placeholder="Email or nickname" />
+        <input id="li-pw" type="password" autocomplete="current-password" placeholder="Password" />
       </div>
-      ${warn}
-      <div class="row"><button class="primary" data-action="do-login">Log in</button><button data-action="auth-cancel">Cancel</button></div>
+      ${warn}${buttons('do-login', 'Log in')}
+      <div class="small"><a href="#" data-action="auth-forgot">Forgot your password?</a></div>
+    </div>`;
+  } else if (st.authForm === 'forgot') {
+    form = `<div class="stack auth">
+      <div class="small">Enter your email and we'll send a link to choose a new password.</div>
+      <input id="fg-email" type="email" autocomplete="email" maxlength="254" placeholder="Email" />
+      ${buttons('do-forgot', 'Send link')}
+    </div>`;
+  } else if (st.authForm === 'reset') {
+    form = `<div class="stack auth">
+      <h2>Choose a new password</h2>
+      <div class="row">
+        <input id="rs-pw1" type="password" autocomplete="new-password" placeholder="New password (6+ characters)" />
+        <input id="rs-pw2" type="password" autocomplete="new-password" placeholder="Repeat password" />
+      </div>
+      ${warn}${buttons('do-reset', 'Save password')}
+    </div>`;
+  } else if (st.notice) {
+    form = `<div class="notice stack">
+      <div>${esc(st.notice.message)}</div>
+      <div class="small">
+        ${st.notice.kind === 'signup' && st.signupEmail ? '<a href="#" data-action="resend">Send the email again</a> · ' : ''}
+        <a href="#" data-action="notice-close">OK</a>
+      </div>
     </div>`;
   }
   return `<div class="panel stack" style="margin-bottom:16px">${invite}
@@ -241,7 +280,7 @@ function identityHtml(): string {
     ${
       form ||
       `<div class="small muted">Playing as a guest: your games aren't saved.
-        <a href="#" data-action="auth-register">Save my progress</a> (set a password) ·
+        <a href="#" data-action="auth-signup">Sign up</a> ·
         <a href="#" data-action="auth-login">Log in</a></div>`
     }
   </div>`;
@@ -401,7 +440,7 @@ function tableHtml(t: TableView): string {
       rc !== null && st.account
         ? `<div class="small" style="margin-top:8px">Your rating: ${st.account.profile.rating} (${rc >= 0 ? '+' : ''}${rc})</div>`
         : !st.account && !st.practice
-          ? '<div class="small muted" style="margin-top:8px">Playing as a guest, so this game wasn\'t saved. Set a password for your nickname on the home screen to keep your record.</div>'
+          ? '<div class="small muted" style="margin-top:8px">Playing as a guest, so this game wasn\'t saved. Sign up on the home screen to keep your record.</div>'
           : '';
     overlay = `<div class="overlay"><div class="overlay-card"><h2>${winners} win${t.winners.length === 1 && t.winners[0] !== t.you ? 's' : ''}!</h2>${resultsHtml(t, o)}${ratingLine}</div></div>`;
     bottom = `<div class="prompt"><div class="actions">${t.you === t.hostSeat ? '<button class="primary" data-action="start">Play again</button>' : '<span class="muted">The host can start a rematch.</span>'}<button data-action="leave">Leave</button></div></div>`;
@@ -467,32 +506,57 @@ app.addEventListener('click', (e) => {
   if (el.tagName === 'A') e.preventDefault();
   const card = Number(el.dataset.card);
   switch (el.dataset.action) {
-    case 'auth-register':
+    case 'auth-signup':
     case 'auth-login':
-      st.name = val('name').trim() || st.name;
-      st.authForm = el.dataset.action === 'auth-register' ? 'register' : 'login';
+    case 'auth-forgot':
+      st.name = val('name') || st.name;
+      st.authForm = el.dataset.action!.slice(5) as 'signup' | 'login' | 'forgot';
+      st.notice = null;
       render();
-      document.getElementById(st.authForm === 'register' ? 'pw1' : 'login-pw')?.focus();
+      document.getElementById({ signup: 'su-email', login: 'li-login', forgot: 'fg-email' }[st.authForm!])?.focus();
       return;
     case 'auth-cancel':
       st.authForm = null;
+      st.resetCode = null;
       render();
       return;
-    case 'do-register': {
-      if (needName()) return;
-      const pw = val('pw1');
+    case 'notice-close':
+      st.notice = null;
+      render();
+      return;
+    case 'do-signup': {
+      const email = val('su-email').trim();
+      const nickname = (val('name') || st.name).trim();
+      const pw = val('su-pw1');
+      if (!email.includes('@')) return toast('Enter your email address');
+      if (nickname.length < 2 || nickname === 'Guest') return toast('Pick a nickname (at the top) first');
       if (pw.length < 6) return toast('Use a password of at least 6 characters');
-      if (pw !== val('pw2')) return toast("The passwords don't match");
-      st.pendingAuth = 'register';
-      online().send({ t: 'register', password: pw });
+      if (pw !== val('su-pw2')) return toast("The passwords don't match");
+      st.signupEmail = email;
+      online().send({ t: 'signup', email, nickname, password: pw });
       return;
     }
+    case 'resend':
+      online().send({ t: 'resend', email: st.signupEmail });
+      return;
     case 'do-login': {
-      const nickname = val('login-nick').trim();
-      const password = val('login-pw');
-      if (!nickname || !password) return toast('Enter your nickname and password');
-      st.pendingAuth = 'login';
-      online().send({ t: 'login', nickname, password });
+      const login = val('li-login').trim();
+      const password = val('li-pw');
+      if (!login || !password) return toast('Enter your email (or nickname) and password');
+      online().send({ t: 'login', login, password });
+      return;
+    }
+    case 'do-forgot': {
+      const email = val('fg-email').trim();
+      if (!email.includes('@')) return toast('Enter your email address');
+      online().send({ t: 'forgot', email });
+      return;
+    }
+    case 'do-reset': {
+      const pw = val('rs-pw1');
+      if (pw.length < 6) return toast('Use a password of at least 6 characters');
+      if (pw !== val('rs-pw2')) return toast("The passwords don't match");
+      online().send({ t: 'reset', code: st.resetCode!, password: pw });
       return;
     }
     case 'logout':
@@ -563,9 +627,19 @@ app.addEventListener('input', (e) => {
   if (t.id === 'code') st.joinCode = t.value.toUpperCase();
 });
 
+// Links from emails: confirm a sign-up, or choose a new password. Remove the
+// code from the address bar so it isn't bookmarked or shared.
+if (st.verifyCode || st.resetCode) history.replaceState(null, '', location.pathname);
+if (st.verifyCode) {
+  online().send({ t: 'verify', code: st.verifyCode });
+  st.verifyCode = null;
+} else if (st.resetCode) {
+  st.authForm = 'reset';
+  online();
+}
 // Rejoin an in-progress online game after a reload, or open an invite link.
-if (st.joinCode && st.name) online().send({ t: 'join', code: st.joinCode });
-else if (store('doughnut-online') === '1' || st.name) online();
+else if (st.joinCode && st.name) online().send({ t: 'join', code: st.joinCode });
+if (!st.conn && (store('doughnut-online') === '1' || st.name)) online();
 loadLeaders();
 window.addEventListener('beforeunload', () => store('doughnut-online', st.table && !st.practice ? '1' : '0'));
 render();

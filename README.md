@@ -44,22 +44,39 @@ Run with `node dist/server.cjs` (or `npm start`) from the project folder. Settin
 | `APP_ROOT` | current directory | where `dist/` and `models/` live |
 | `PUBLIC_DIR` | `$APP_ROOT/dist/public` | |
 | `MODEL_PATH` | `$APP_ROOT/models/doughnut.json` | without it, bots use the heuristic |
+| `PUBLIC_URL` | `http://localhost:$PORT` | the site's address, used in email links |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM`, `SMTP_SECURE` | none | outgoing email; without it emails go to the log |
 | `DATABASE_URL` | none | `mysql://user:password@host:3306/dbname` |
 | `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE` | none | alternative to `DATABASE_URL` |
 
-### Players, accounts and the database (MySQL)
+### Players, accounts and email
 
 - **Guests:** anyone can play straight away by picking a nickname. Nothing about a guest is saved: no player row, no history, no rating. In saved games, guest seats are stored only as "Guest".
-- **Accounts:** a guest can **save their progress** at any time by choosing a password for their current nickname. That nickname then belongs to them (case-insensitive), guests can no longer use it, and from then on their games and rating are saved. Registering mid-game counts the game in progress. On another device they **log in** with nickname and password. Logging in and out is blocked during a game. "Guest" is reserved. AI players are marked with a robot icon, so people are free to use "Bot" in their names.
-- **Passwords** are hashed with scrypt (Node built-in, salted). After 5 wrong attempts a nickname is locked for 30 s, doubling up to 15 min. **Serve the site over HTTPS** so passwords aren't sent in the clear; the login form warns when it isn't.
-- **Browser sessions:** each browser has a random token. Logging in links the token to the account, storing only its SHA-256 hash, so a reload keeps you logged in. Log out removes the link for that browser only.
+- **Sign up:** email, password, and the nickname others see (unique, ignoring capitals; "Guest" is reserved). We email a **confirmation link**. Until it's opened the player stays a guest. Opening it, on any device, confirms the account and logs that browser in. The browser that signed up is logged in at the same moment if it's still connected, and if it's mid-game, that game counts. Unconfirmed sign-ups are deleted after 48 hours, freeing the nickname. Guests can't use a confirmed account's nickname.
+- **Log in** with email or nickname, plus password. Logging in and out is blocked during a game.
+- **Forgot password:** enter your email to get a link that works once, for 1 hour. Setting a new password logs out every other device.
+- **Privacy:** sign-up and "forgot password" answer the same whether or not an email has an account, so nobody can probe for accounts. If someone signs up with an email that already has an account, its owner gets an email saying so, with a reset link.
+- **Security:**
+  - passwords are hashed with scrypt (salted, Node built-in)
+  - email links are random, single-use, and stored only as SHA-256 hashes
+  - after 5 wrong passwords a login is locked for 30 s, doubling up to 15 min
+  - at most one email per address per minute, and five per hour
+  - **serve the site over HTTPS**; the forms warn when it isn't
+- **Browser sessions:** each browser has a random token. Logging in links its SHA-256 hash to the account, so a reload keeps you logged in.
+
+**Email settings:** `SMTP_HOST`, `SMTP_PORT` (default 587; 465 uses TLS from the start), `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` (e.g. `Doughnut <no-reply@yourdomain>`), and optionally `SMTP_SECURE=true|false`. `PUBLIC_URL` is the site's address used in links (e.g. `https://doughnut.example.com`). **Without SMTP settings, emails are printed to the server log instead of sent**, which is handy for trying it out. Use the SMTP details from your host's email settings; they usually match what a mail app would use.
 
 With a database configured, all of this is saved. Without one (or if it can't connect at startup; it logs why), accounts work until the server restarts, then are forgotten.
 
-- **Setup:** create an empty database and a user with rights on it. The server creates and upgrades its tables on startup, so there's no migration step. Tables from the first version, which had one row per browser and no passwords, are moved aside to `*_v1`. Works with MySQL 5.7+/8 and MariaDB 10.3+.
+- **Setup:** create an empty database and a user with rights on it. The server creates and upgrades its tables on startup, so there's no migration step. Upgrading from earlier versions:
+  - first-version tables (one row per browser, no passwords) are moved aside to `*_v1`
+  - nickname + password accounts get email columns and keep working, logging in by nickname (they can't reset a password: no email)
+
+  Works with MySQL 5.7+/8 and MariaDB 10.3+.
 - **Tables:**
-  - `players`: accounts (nickname, scrypt password hash, OpenSkill `mu`/`sigma`, games, wins)
+  - `players`: accounts (email, nickname, scrypt password hash, `verified_at`, OpenSkill `mu`/`sigma`, games, wins)
   - `sessions`: browser token hash → player
+  - `email_links`: confirmation and reset link hashes, with expiry and when used
   - `games`: one row per finished game that included at least one account
   - `game_players`: one row per seat, with kind (account/guest/bot), final score, placing, won, left early, rating before and after
 - **Ratings:** OpenSkill (Weng-Lin) among the registered players in a game, placed by final score (ties share a place, players who left finish last). A game is rated when it has two or more registered players; guests and bots affect placings but have no rating. The displayed rating is `1000 + 40 × (mu − 3σ)`: a new player starts at 1000, and it rises as the system becomes sure of you.
@@ -74,7 +91,7 @@ To deploy, upload `dist/` and `models/` (no `npm install` needed on the host) an
 
 `GET /health` returns `{ ok, tables, model }`.
 
-What's in it: guests with a nickname, and accounts once they set a password (a random token kept in the browser means a reload rejoins the same seat), private tables (2–6 seats) with a 5-letter code and invite link, quick match (4 seats; bots fill in after 10 s), ratings and a leaderboard (with MySQL), and offline practice that runs the same table code in the browser. AI players get names from a list of funny ones (`src/game/bot-names.ts`), never repeating at a table or copying a human there, and keep them for a rematch. They show a robot icon wherever their name appears. A player who leaves keeps their name, gains the icon, and a bot plays on for them. The table is drawn in SVG: a felt oval inside a stitched leather rail, with players seated around it, you always at the bottom, and each card played landing in front of whoever played it. On narrow screens the oval stands upright. The server is the only authority: each player receives only their own view, and every move is checked by the engine. Bots fill empty seats, play for anyone who misses the 30 s turn timer, and cover disconnected players within 1.5 s until they reconnect. Code: `src/game/` (table, lobby, protocol; no Node dependencies), `src/server/` (HTTP + WebSocket), `src/client/` (plain TypeScript, no framework).
+What's in it: guests with a nickname, and accounts once they sign up with an email (a random token kept in the browser means a reload rejoins the same seat), private tables (2–6 seats) with a 5-letter code and invite link, quick match (4 seats; bots fill in after 10 s), ratings and a leaderboard (with MySQL), and offline practice that runs the same table code in the browser. AI players get names from a list of funny ones (`src/game/bot-names.ts`), never repeating at a table or copying a human there, and keep them for a rematch. They show a robot icon wherever their name appears. A player who leaves keeps their name, gains the icon, and a bot plays on for them. The table is drawn in SVG: a felt oval inside a stitched leather rail, with players seated around it, you always at the bottom, and each card played landing in front of whoever played it. On narrow screens the oval stands upright. The server is the only authority: each player receives only their own view, and every move is checked by the engine. Bots fill empty seats, play for anyone who misses the 30 s turn timer, and cover disconnected players within 1.5 s until they reconnect. Code: `src/game/` (table, lobby, protocol; no Node dependencies), `src/server/` (HTTP + WebSocket), `src/client/` (plain TypeScript, no framework).
 
 ## Commands
 
