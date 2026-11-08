@@ -368,6 +368,53 @@ describe('lobby accounts', () => {
     void clock;
   });
 
+  it('invites: only friends who are online, only with a free seat, not too often', async () => {
+    const { clock, mail, lobby } = setup();
+    const a = new Rec();
+    const b = new Rec();
+    const c = new Rec();
+    async function account(r: Rec, token: string, name: string, email: string) {
+      await lobby.handle(r, null, { t: 'hello', token, name });
+      await lobby.handle(r, token, { t: 'signup', email, nickname: name, password: 'secret1' });
+      await lobby.handle(r, token, { t: 'verify', code: linkCode(mail, 'verify', email) });
+    }
+    await account(a, TA, 'Alice', 'alice@example.com');
+    await account(b, TB, 'Bob', 'bob@example.com');
+    await account(c, TC, 'Cat', 'cat@example.com');
+    await lobby.handle(a, TA, { t: 'friendAdd', nickname: 'Bob' });
+    await lobby.handle(b, TB, { t: 'friendRespond', nickname: 'Alice', accept: true });
+
+    await lobby.handle(a, TA, { t: 'invite', nickname: 'Bob' });
+    expect(a.last('error')!.message).toMatch(/not at a table/);
+    await lobby.handle(a, TA, { t: 'create', settings: { mode: 'doughnut', seats: 2, botLevel: 'easy' } });
+    const code = a.last('table')!.table.code;
+    await lobby.handle(a, TA, { t: 'invite', nickname: 'Cat' });
+    expect(a.last('error')!.message).toMatch(/isn't on your friends list/);
+
+    await lobby.handle(a, TA, { t: 'invite', nickname: 'bob' });
+    expect(a.last('toast')!.message).toBe('Invite sent to bob');
+    expect(b.last('invite')!.invite).toEqual({ from: 'Alice', code, mode: 'doughnut', status: 'lobby', humans: 1, seats: 2 });
+    await lobby.handle(a, TA, { t: 'invite', nickname: 'Bob' });
+    expect(a.last('error')!.message).toMatch(/a moment ago/);
+
+    // "No thanks" tells Alice.
+    await lobby.handle(b, TB, { t: 'inviteDecline', from: 'Alice' });
+    expect(a.last('toast')!.message).toBe("Bob can't join right now");
+
+    // Bob accepts a later invite by joining; then nobody else fits.
+    await lobby.handle(b, TB, { t: 'join', code });
+    expect(b.last('table')!.table.you).toBe(1);
+    clock.advance(31_000);
+    await lobby.handle(a, TA, { t: 'invite', nickname: 'Bob' });
+    expect(a.last('error')!.message).toMatch(/already at this table/);
+
+    // Offline friends can't be invited.
+    await lobby.handle(b, TB, { t: 'leave' });
+    lobby.disconnect(b, TB);
+    await lobby.handle(a, TA, { t: 'invite', nickname: 'Bob' });
+    expect(a.last('error')!.message).toMatch(/offline/);
+  });
+
   it('guests are asked to sign up before adding friends', async () => {
     const { lobby } = setup();
     const g = new Rec();

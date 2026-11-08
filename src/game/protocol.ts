@@ -80,6 +80,16 @@ export interface FriendsView {
   outgoing: string[];
 }
 
+export interface Invite {
+  /** The inviting friend's nickname. */
+  from: string;
+  code: string;
+  mode: string;
+  status: 'lobby' | 'playing' | 'over';
+  humans: number;
+  seats: number;
+}
+
 /** The signed-in account, or null for a guest. */
 export interface AccountView {
   nickname: string;
@@ -103,6 +113,10 @@ export type ClientMessage =
   | { t: 'friendRespond'; nickname: string; accept: boolean }
   /** Remove a friend, or cancel a request you sent. */
   | { t: 'friendRemove'; nickname: string }
+  /** Invite a friend to the table you're at. */
+  | { t: 'invite'; nickname: string }
+  /** Turn down an invite (the inviter is told you can't join right now). */
+  | { t: 'inviteDecline'; from: string }
   | { t: 'create'; settings: TableSettings }
   | { t: 'join'; code: string }
   | { t: 'quick'; mode: string }
@@ -118,6 +132,8 @@ export type ServerMessage =
   | { t: 'notice'; kind: 'signup' | 'reset'; message: string }
   /** Your friends and their status; sent when you log in and whenever it changes. */
   | { t: 'friends'; friends: FriendsView }
+  /** A friend invites you to their table. */
+  | { t: 'invite'; invite: Invite }
   /** A short message to show (e.g. "Friend request sent"). */
   | { t: 'toast'; message: string }
   | { t: 'profile'; profile: Profile; ratingChange: number | null }

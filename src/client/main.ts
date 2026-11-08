@@ -1,6 +1,6 @@
 /** Web client: home, quick-match queue, lobby and game table. */
 import { MODES, RANKS, SUIT_SYMBOLS, rankOf, suitOf, type Card, type Move } from '../engine';
-import type { AccountView, BotLevel, ClientMessage, FriendView, FriendsView, ServerMessage, TableSettings, TableView, WireObservation } from '../game/protocol';
+import type { AccountView, BotLevel, ClientMessage, FriendView, FriendsView, Invite, ServerMessage, TableSettings, TableView, WireObservation } from '../game/protocol';
 import { localConn, onlineConn, type Conn, type Status } from './conn';
 import { robotHtml } from './icons';
 import { chooseLayout, tableSvg } from './table-svg';
@@ -43,6 +43,10 @@ const st = {
   notice: null as { kind: 'signup' | 'reset'; message: string } | null,
   signupEmail: '',
   friends: null as FriendsView | null,
+  /** Invites from friends (newest last); they expire after 2 minutes. */
+  invites: [] as (Invite & { at: number })[],
+  /** The "invite friends" panel at the table. */
+  invitePanel: false,
   /** Signed-in account; null = guest (nothing saved). */
   account: null as AccountView | null,
   /** Which account form is open on the home screen. */
@@ -106,6 +110,9 @@ function onMessage(m: ServerMessage) {
     case 'toast':
       toast(m.message);
       break;
+    case 'invite':
+      st.invites = [...st.invites.filter((i) => i.from !== m.invite.from), { ...m.invite, at: Date.now() }];
+      break;
     case 'notice':
       st.notice = { kind: m.kind, message: m.message };
       st.authForm = null;
@@ -142,6 +149,7 @@ function onMessage(m: ServerMessage) {
 
 function backHome() {
   st.table = null;
+  st.invitePanel = false;
   st.ratingChange = null;
   loadLeaders();
   st.screen = 'home';
@@ -474,14 +482,52 @@ function resultsHtml(t: TableView, o: WireObservation): string {
   return `<table class="results"><tr><th>Player</th><th>Hand</th><th>Change</th><th>Score</th></tr>${rows}</table>`;
 }
 
+/** Whether someone could join this table: an open seat, or a bot seat to take over. */
+const tableJoinable = (t: TableView) => t.seats.some((x) => x.kind === (t.status === 'lobby' ? 'open' : 'bot'));
+
+function invitePanelHtml(t: TableView): string {
+  const joinable = tableJoinable(t);
+  const friends = st.friends?.friends ?? [];
+  const rows = friends
+    .map((f) => {
+      const here = f.table?.code === t.code;
+      const can = joinable && !here && f.status !== 'offline';
+      const why = here ? 'at this table' : f.status === 'offline' ? 'offline' : friendStatus(f);
+      return `<div class="friend"><span class="dot ${f.status}"></span><span class="fname">${esc(f.nickname)}</span><span class="fstatus">${why}</span>
+        <span class="factions"><button class="primary small-btn" data-action="invite-send" data-nick="${esc(f.nickname)}" ${can ? '' : 'disabled'}>Invite</button></span></div>`;
+    })
+    .join('');
+  return `<div class="panel stack invite-panel">
+    <div class="bar" style="margin:0"><h2 style="margin:0">Invite friends</h2><button class="small-btn quiet" data-action="invite-toggle" aria-label="Close">✕</button></div>
+    ${joinable ? `<div class="small muted">${t.status === 'lobby' ? 'They take an open seat.' : "They take over a bot's seat, score and all."}</div>` : '<div class="small bad">There are no free seats at this table right now.</div>'}
+    <div class="friends">${rows || '<div class="small muted">No friends yet. Add friends on the home screen.</div>'}</div>
+  </div>`;
+}
+
+function invitesHtml(): string {
+  if (!st.invites.length) return '';
+  return `<div class="invites">${st.invites
+    .map((i) => {
+      const what = i.status === 'lobby' ? `waiting for players (${i.humans} of ${i.seats})` : `${i.humans} of ${i.seats} people playing`;
+      return `<div class="invite" role="alert">
+        <div><strong>${esc(i.from)}</strong> invites you to their game · ${esc(MODES[i.mode]?.name ?? i.mode)} · ${what}</div>
+        <div class="factions"><button class="primary small-btn" data-action="invite-join" data-code="${esc(i.code)}" data-from="${esc(i.from)}">Join</button>
+        <button class="small-btn" data-action="invite-dismiss" data-from="${esc(i.from)}">No thanks</button></div>
+      </div>`;
+    })
+    .join('')}</div>`;
+}
+
 function tableHtml(t: TableView): string {
   const o = t.obs;
   const mode = MODES[t.settings.mode];
   const conn = st.practice ? 'practice' : st.status;
   const header = `<div class="bar">
       <div><strong>${esc(mode.name)}</strong> <span class="muted small">${st.practice ? 'practice' : `table ${t.code}`}${o ? ` · hand ${o.handsPlayed + (o.phase === 'handOver' || o.phase === 'gameOver' ? 0 : 1)}` : ''}</span></div>
-      <div><span class="conn ${conn === 'offline' ? 'offline' : ''}">${conn === 'offline' ? 'reconnecting…' : conn}</span> <button data-action="leave">Leave</button></div>
-    </div>`;
+      <div><span class="conn ${conn === 'offline' ? 'offline' : ''}">${conn === 'offline' ? 'reconnecting…' : conn}</span>
+        ${st.account && !st.practice ? `<button data-action="invite-toggle" aria-expanded="${st.invitePanel}">Invite friends</button>` : ''}
+        <button data-action="leave">Leave</button></div>
+    </div>${st.invitePanel && st.account && !st.practice ? invitePanelHtml(t) : ''}`;
   const svg = tableSvg(t, chooseLayout(window.innerWidth));
 
   if (t.status === 'lobby') {
@@ -519,12 +565,19 @@ function tableHtml(t: TableView): string {
 
 function render() {
   const focused = document.activeElement?.id;
-  app.innerHTML = st.screen === 'home' ? homeHtml() : st.screen === 'queue' ? queueHtml() : st.table ? tableHtml(st.table) : homeHtml();
+  app.innerHTML =
+    invitesHtml() + (st.screen === 'home' ? homeHtml() : st.screen === 'queue' ? queueHtml() : st.table ? tableHtml(st.table) : homeHtml());
   if (focused) (document.getElementById(focused) as HTMLInputElement | null)?.focus();
   tickCountdown();
 }
 
 function tickCountdown() {
+  const fresh = st.invites.filter((i) => Date.now() - i.at < 120_000);
+  if (fresh.length !== st.invites.length) {
+    st.invites = fresh;
+    render();
+    return;
+  }
   for (const el of document.querySelectorAll<HTMLElement>('[data-deadline]')) {
     const s = Math.max(0, Math.ceil((Number(el.dataset.deadline) - Date.now()) / 1000));
     el.textContent = s <= 15 ? `${s}s` : '';
@@ -644,6 +697,27 @@ app.addEventListener('click', (e) => {
       return;
     case 'friend-join':
       send({ t: 'join', code: el.dataset.code! });
+      return;
+    case 'invite-toggle':
+      st.invitePanel = !st.invitePanel;
+      render();
+      return;
+    case 'invite-send':
+      send({ t: 'invite', nickname: el.dataset.nick! });
+      return;
+    case 'invite-join': {
+      const code = el.dataset.code!;
+      const inGame = st.table && st.table.code !== code && st.table.status === 'playing' && !st.practice;
+      if (inGame && !confirm('Leave your current game to join? A bot will finish it for you.')) return;
+      st.invites = st.invites.filter((i) => i.from !== el.dataset.from);
+      st.invitePanel = false;
+      online().send({ t: 'join', code });
+      return;
+    }
+    case 'invite-dismiss':
+      st.invites = st.invites.filter((i) => i.from !== el.dataset.from);
+      send({ t: 'inviteDecline', from: el.dataset.from! });
+      render();
       return;
     case 'quick':
       if (needName()) return;

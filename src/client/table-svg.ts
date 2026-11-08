@@ -115,8 +115,8 @@ function seatPlate(L: Layout, t: TableView, o: WireObservation | null, i: number
   const open = seat.kind === 'open';
   const isBot = seat.kind === 'bot';
   const hasIcon = isBot || seat.covered;
-  // The name gets the whole top line; ~9.5px per character at this size.
-  const name = clip(seat.name, Math.floor((w - (hasIcon ? 35 : 14) - 10) / 9.5));
+  // The name gets the whole top line; ~9px per character at this size.
+  const name = clip(seat.name, Math.floor((w - (hasIcon ? 35 : 14) - 10) / 9));
 
   let status = '';
   if (!o) status = open ? 'waiting…' : isBot ? 'AI player' : i === t.hostSeat ? 'host' : seat.connected ? 'ready' : 'away';

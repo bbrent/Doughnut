@@ -70,6 +70,8 @@ Signed-up players can add friends by nickname. The other player accepts or decli
 - at a waiting table, you take an open seat
 - in a game in progress, you take over a bot's seat, keeping its score; you aren't credited for that game, since you didn't play all of it
 
+**Invites:** at a table, **Invite friends** lists your friends. Online friends can be invited when the table has room: an open seat before the start, a bot's seat after. They get a banner on whatever screen they're on, with **Join** or **No thanks**. Joining from another game asks first, since a bot finishes that game for them. "No thanks" lets the inviter know. You can invite the same friend at most once every 30 seconds, and invites expire after 2 minutes.
+
 Lists update live as friends come and go. Each player can have up to 200 friends. Stored in `friendships`: a pending request is one row from requester to friend, an accepted friendship is a row in each direction.
 
 Anyone with a table's code can also join a game in progress this way, by taking a bot's seat.

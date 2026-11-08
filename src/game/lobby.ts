@@ -101,6 +101,8 @@ export class Lobby {
   private friendCache = new Map<string, FriendCache>();
   private lastPresence = new Map<string, string>();
   private tableKeys = new WeakMap<Table, string>();
+  /** When each "inviter>friend" invite was last sent, to stop spamming. */
+  private lastInvite = new Map<string, number>();
   private tables = new Map<string, Table>();
   private members = new Map<Table, Set<Session>>();
   private queue: { session: Session; mode: string; since: number }[] = [];
@@ -190,6 +192,16 @@ export class Lobby {
           const me = this.requireAccount(s);
           const other = await this.requireAccounts().removeFriend(me, msg.nickname);
           await this.reloadFriends(me, other.id);
+          break;
+        }
+        case 'invite':
+          this.invite(s, msg.nickname);
+          client.send({ t: 'toast', message: `Invite sent to ${msg.nickname}` });
+          break;
+        case 'inviteDecline': {
+          const me = this.requireAccount(s);
+          const from = this.friendByNickname(me, msg.from);
+          if (from) this.sendTo(from, { t: 'toast', message: `${s.user.name} can't join right now` });
           break;
         }
         case 'create':
@@ -560,6 +572,34 @@ export class Lobby {
   }
 
   // ---- friends -------------------------------------------------------------
+
+  private friendByNickname(accountId: string, nickname: string): string | null {
+    const key = nickname.trim().toLowerCase();
+    for (const [id, nick] of this.friendCache.get(accountId)?.friends ?? []) if (nick.toLowerCase() === key) return id;
+    return null;
+  }
+
+  /** Invite a friend to the table this session is at. */
+  private invite(s: Session, nickname: string): void {
+    const me = this.requireAccount(s);
+    const t = this.requireTable(s);
+    const friendId = this.friendByNickname(me, nickname);
+    if (!friendId) throw new AccountError(`${nickname} isn't on your friends list`);
+    const nick = this.friendCache.get(me)!.friends.get(friendId)!;
+    const theirs = this.sessionsOf(friendId);
+    if (!theirs.some((x) => x.clients.size > 0)) throw new AccountError(`${nick} is offline`);
+    if (theirs.some((x) => x.table === t)) throw new AccountError(`${nick} is already at this table`);
+    if (!t.joinable()) throw new AccountError('There are no free seats at this table');
+    const key = `${me}>${friendId}`;
+    const last = this.lastInvite.get(key) ?? -Infinity;
+    if (this.now() - last < 30_000) throw new AccountError(`You invited ${nick} a moment ago`);
+    this.lastInvite.set(key, this.now());
+    const status = t.status as 'lobby' | 'playing' | 'over';
+    this.sendTo(friendId, {
+      t: 'invite',
+      invite: { from: s.user.name, code: t.code, mode: t.settings.mode, status, humans: t.humanCount(), seats: t.settings.seats },
+    });
+  }
 
   private requireAccount(s: Session): string {
     if (!s.user.accountId) throw new AccountError('Sign up to add friends');
