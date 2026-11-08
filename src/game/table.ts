@@ -139,12 +139,30 @@ export class Table {
       this.setConnected(user.id, true);
       return existing;
     }
-    if (this.status !== 'lobby') throw new TableError('That game has already started');
-    const open = this.seats.findIndex((s) => s.kind === 'open');
-    if (open < 0) throw new TableError('Table is full');
-    this.seats[open] = { kind: 'human', user, connected: true };
+    if (this.status === 'lobby') {
+      const open = this.seats.findIndex((s) => s.kind === 'open');
+      if (open < 0) throw new TableError('Table is full');
+      this.seats[open] = { kind: 'human', user, connected: true };
+      this.changed();
+      return open;
+    }
+    // A game in progress (or just finished): take over a bot's seat, score and all.
+    const bot = this.seats.findIndex((s) => s.kind === 'bot');
+    if (bot < 0) throw new TableError('That game is full');
+    this.seats[bot] = { kind: 'human', user, connected: true };
+    if (this.status === 'playing' && this.state?.toAct === bot) this.schedule(); // their turn now, with a turn timer
     this.changed();
-    return open;
+    return bot;
+  }
+
+  /** Whether someone else could join now: an open seat, or a bot seat to take over. */
+  joinable(): boolean {
+    return this.seats.some((s) => s.kind === (this.status === 'lobby' ? 'open' : 'bot'));
+  }
+
+  /** Humans currently seated. */
+  humanCount(): number {
+    return this.seats.filter((s) => s.kind === 'human').length;
   }
 
   /** Leave for good. In a game, a bot takes the seat over. */
@@ -277,6 +295,10 @@ export class Table {
       seats: this.seats.map((seat, i) => {
         const orig = this.originalUsers[i] ?? null;
         const stillHere = !!orig && seat.kind === 'human' && seat.user.id === orig.id;
+        if (!orig && seat.kind === 'human') {
+          // Took over a bot's seat part-way through: a person, but not credited for the game.
+          return { userId: seat.user.id, accountId: null, name: seat.user.name, botLevel: null, finalScore: s.scores[i], leftEarly: false };
+        }
         return {
           userId: orig?.id ?? null,
           accountId: orig?.accountId ?? null,

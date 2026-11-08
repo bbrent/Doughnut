@@ -64,6 +64,16 @@ Run with `node dist/server.cjs` (or `npm start`) from the project folder. Settin
   - **serve the site over HTTPS**; the forms warn when it isn't
 - **Browser sessions:** each browser has a random token. Logging in links its SHA-256 hash to the account, so a reload keeps you logged in.
 
+### Friends
+
+Signed-up players can add friends by nickname. The other player accepts or declines, so nobody sees your status without agreeing to it. The home screen lists friends with live status: offline, online, looking for a quick match, waiting at a table (with free seats), or playing. A **Join** button appears when there's room:
+- at a waiting table, you take an open seat
+- in a game in progress, you take over a bot's seat, keeping its score; you aren't credited for that game, since you didn't play all of it
+
+Lists update live as friends come and go. Each player can have up to 200 friends. Stored in `friendships`: a pending request is one row from requester to friend, an accepted friendship is a row in each direction.
+
+Anyone with a table's code can also join a game in progress this way, by taking a bot's seat.
+
 **Email settings:** `SMTP_HOST`, `SMTP_PORT` (default 587; 465 uses TLS from the start), `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` (e.g. `Doughnut <no-reply@yourdomain>`), and optionally `SMTP_SECURE=true|false`. `PUBLIC_URL` is the site's address used in links (e.g. `https://doughnut.example.com`). **Without SMTP settings, emails are printed to the server log instead of sent**, which is handy for trying it out. Use the SMTP details from your host's email settings; they usually match what a mail app would use.
 
 With a database configured, all of this is saved. Without one (or if it can't connect at startup; it logs why), accounts work until the server restarts, then are forgotten.
@@ -77,6 +87,7 @@ With a database configured, all of this is saved. Without one (or if it can't co
   - `players`: accounts (email, nickname, scrypt password hash, `verified_at`, OpenSkill `mu`/`sigma`, games, wins)
   - `sessions`: browser token hash → player
   - `email_links`: confirmation and reset link hashes, with expiry and when used
+  - `friendships`: friend requests and friendships
   - `games`: one row per finished game that included at least one account
   - `game_players`: one row per seat, with kind (account/guest/bot), final score, placing, won, left early, rating before and after
 - **Ratings:** OpenSkill (Weng-Lin) among the registered players in a game, placed by final score (ties share a place, players who left finish last). A game is rated when it has two or more registered players; guests and bots affect placings but have no rating. The displayed rating is `1000 + 40 × (mu − 3σ)`: a new player starts at 1000, and it rises as the system becomes sure of you.

@@ -101,14 +101,30 @@ describe('table', () => {
     expect(() => t.start('b')).toThrow();
   });
 
-  it('rejects joining a started game or a full table', () => {
+  it('rejects a full table; a started game can be joined by taking over a bot seat', () => {
     const clock = new FakeClock();
     const t = table(clock, 2);
     t.join(bob);
     expect(() => t.join({ id: 'c', name: 'C', accountId: null })).toThrow('full');
     t.start('a');
-    expect(() => t.join({ id: 'd', name: 'D', accountId: null })).toThrow('started');
+    expect(t.joinable()).toBe(false);
+    expect(() => t.join({ id: 'd', name: 'D', accountId: null })).toThrow('full');
+
+    const t3 = table(clock, 3);
+    t3.join(bob);
+    t3.start('a');
+    expect(t3.joinable()).toBe(true);
+    const before = t3.state!.scores[2];
+    const carol = { id: 'c', name: 'Carol', accountId: 'acct-c' };
+    expect(t3.join(carol)).toBe(2);
+    expect(t3.view('c').seats[2]).toMatchObject({ kind: 'human', name: 'Carol' });
+    expect(t3.view('c').obs!.scores[2]).toBe(before);
+    expect(t3.joinable()).toBe(false);
+    clock.runAll();
+    // Joined part-way through: recorded as a person, but not credited to their account.
+    expect(t3.record().seats[2]).toMatchObject({ userId: 'c', accountId: null, leftEarly: false });
   });
+
 });
 
 class Recorder implements Client {

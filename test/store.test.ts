@@ -156,6 +156,29 @@ async function exerciseAccounts(repo: Repo, clock: FakeClock) {
   expect(out.size).toBe(2);
   const board = await svc.leaderboard(10);
   expect(board.map((r) => r.name)).toEqual(['Alice', 'Carol']);
+
+  // Friends: request, accept, remove; only confirmed accounts.
+  await expect(svc.addFriend(acct.id, 'nobody')).rejects.toThrow(/No player called/);
+  await expect(svc.addFriend(acct.id, 'alice')).rejects.toThrow(/That's you/);
+  expect((await svc.addFriend(acct.id, 'CAROL')).state).toBe('requested');
+  expect((await svc.addFriend(acct.id, 'Carol')).state).toBe('requested'); // asking twice is harmless
+  expect(await svc.friendLists(acct.id)).toMatchObject({ friends: [], outgoing: [{ nickname: 'Carol' }], incoming: [] });
+  expect(await svc.friendLists(carol.id)).toMatchObject({ friends: [], incoming: [{ nickname: 'Alice' }] });
+  await expect(svc.respondFriend(acct.id, 'Carol', true)).rejects.toThrow(/hasn't asked/);
+  await svc.respondFriend(carol.id, 'Alice', true);
+  expect((await svc.friendLists(acct.id)).friends.map((f) => f.nickname)).toEqual(['Carol']);
+  expect((await svc.friendLists(carol.id)).friends.map((f) => f.nickname)).toEqual(['Alice']);
+  expect((await svc.addFriend(carol.id, 'Alice')).state).toBe('already');
+  await svc.removeFriend(carol.id, 'alice');
+  expect(await svc.friendLists(acct.id)).toMatchObject({ friends: [], incoming: [], outgoing: [] });
+  // Asking someone who already asked you makes you friends at once.
+  await svc.addFriend(acct.id, 'Carol');
+  expect((await svc.addFriend(carol.id, 'Alice')).state).toBe('accepted');
+  // Declining removes the request.
+  await svc.removeFriend(acct.id, 'Carol');
+  await svc.addFriend(carol.id, 'Alice');
+  await svc.respondFriend(acct.id, 'Carol', false);
+  expect(await svc.friendLists(carol.id)).toMatchObject({ friends: [], outgoing: [] });
   return { svc, mail };
 }
 
@@ -172,7 +195,7 @@ describe.skipIf(!MYSQL)('MySqlRepo (TEST_MYSQL_URL)', () => {
   it('migrates older schemas and runs the whole account life cycle', async () => {
     const db = await (await import('mysql2/promise')).createConnection(MYSQL!);
     await db.query('SET FOREIGN_KEY_CHECKS = 0');
-    for (const t of ['game_players', 'games', 'sessions', 'email_links', 'players', 'game_players_v1', 'games_v1', 'players_v1']) {
+    for (const t of ['game_players', 'games', 'sessions', 'email_links', 'friendships', 'players', 'game_players_v1', 'games_v1', 'players_v1']) {
       await db.query(`DROP TABLE IF EXISTS ${t}`);
     }
     await db.query('SET FOREIGN_KEY_CHECKS = 1');
@@ -203,6 +226,11 @@ describe.skipIf(!MYSQL)('MySqlRepo (TEST_MYSQL_URL)', () => {
     await svc.signup(TB, 'dee@example.com', 'Dee', 'secret1');
     const dee = await svc.verifyEmail(TB, linkCode(mail, 'verify'));
     await svc.recordGame(rec([0, 5], [dee.id, String(legacy!.id)]));
+    await svc.addFriend(dee.id, 'Old');
+    await svc.respondFriend(String(legacy!.id), 'Dee', true);
+    expect((await svc.friendLists(dee.id)).friends.map((f) => f.nickname)).toEqual(['Old']);
+    await svc.removeFriend(dee.id, 'Old');
+    expect((await svc.friendLists(String(legacy!.id))).friends).toEqual([]);
     const [gp] = await db.query('SELECT kind FROM game_players');
     expect((gp as unknown[]).length).toBe(2);
     const [links] = await db.query('SELECT code_hash, used_at FROM email_links');
@@ -302,6 +330,50 @@ describe('lobby accounts', () => {
     const laptop2 = new Rec();
     await lobby.handle(laptop2, null, { t: 'hello', token: TA, name: '' });
     expect(laptop2.last('welcome')!.account).toBeNull();
+  });
+
+  it('friends: request, accept, live status, and joining their game', async () => {
+    const { clock, mail, lobby } = setup();
+    const a = new Rec();
+    const b = new Rec();
+    async function account(r: Rec, token: string, name: string, email: string) {
+      await lobby.handle(r, null, { t: 'hello', token, name });
+      await lobby.handle(r, token, { t: 'signup', email, nickname: name, password: 'secret1' });
+      await lobby.handle(r, token, { t: 'verify', code: linkCode(mail, 'verify', email) });
+    }
+    await account(a, TA, 'Alice', 'alice@example.com');
+    await account(b, TB, 'Bob', 'bob@example.com');
+    expect(a.last('friends')!.friends).toEqual({ friends: [], incoming: [], outgoing: [] });
+
+    await lobby.handle(a, TA, { t: 'friendAdd', nickname: 'bob' });
+    expect(a.last('toast')!.message).toBe('Friend request sent to Bob');
+    expect(b.last('toast')!.message).toBe('Alice wants to be friends');
+    expect(b.last('friends')!.friends.incoming).toEqual(['Alice']);
+    await lobby.handle(b, TB, { t: 'friendRespond', nickname: 'Alice', accept: true });
+    expect(a.last('friends')!.friends.friends).toEqual([{ nickname: 'Bob', status: 'online', table: null }]);
+
+    // Bob starts a 3-seat game with a bot: Alice sees it and can join (taking the bot's seat).
+    await lobby.handle(b, TB, { t: 'create', settings: { mode: 'doughnut', seats: 3, botLevel: 'easy' } });
+    const code = b.last('table')!.table.code;
+    expect(a.last('friends')!.friends.friends[0]).toMatchObject({ status: 'lobby', table: { code, humans: 1, joinable: true } });
+    await lobby.handle(b, TB, { t: 'start' });
+    expect(a.last('friends')!.friends.friends[0]).toMatchObject({ status: 'playing', table: { code, joinable: true } });
+    await lobby.handle(a, TA, { t: 'join', code });
+    expect(a.last('table')!.table).toMatchObject({ status: 'playing', you: 1 });
+    expect(b.last('friends')!.friends.friends[0]).toMatchObject({ nickname: 'Alice', status: 'playing', table: { humans: 2 } });
+
+    // Going offline shows as offline.
+    lobby.disconnect(a, TA);
+    expect(b.last('friends')!.friends.friends[0].status).toBe('offline');
+    void clock;
+  });
+
+  it('guests are asked to sign up before adding friends', async () => {
+    const { lobby } = setup();
+    const g = new Rec();
+    await lobby.handle(g, null, { t: 'hello', token: TA, name: 'Gus' });
+    await lobby.handle(g, TA, { t: 'friendAdd', nickname: 'Alice' });
+    expect(g.last('error')!.message).toMatch(/Sign up to add friends/);
   });
 
   it('without accounts, signing up is unavailable but play works', async () => {

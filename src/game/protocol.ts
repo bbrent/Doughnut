@@ -64,6 +64,22 @@ export interface GameRecord {
   }[];
 }
 
+/** What a friend is doing right now. */
+export interface FriendView {
+  nickname: string;
+  status: 'offline' | 'online' | 'queue' | 'lobby' | 'playing' | 'over';
+  /** The table they're at, if any. */
+  table: { code: string; mode: string; seats: number; humans: number; joinable: boolean } | null;
+}
+
+export interface FriendsView {
+  friends: FriendView[];
+  /** Nicknames asking to be your friend. */
+  incoming: string[];
+  /** Nicknames you've asked. */
+  outgoing: string[];
+}
+
 /** The signed-in account, or null for a guest. */
 export interface AccountView {
   nickname: string;
@@ -83,6 +99,10 @@ export type ClientMessage =
   | { t: 'forgot'; email: string }
   /** The code from a reset link, with the new password. */
   | { t: 'reset'; code: string; password: string }
+  | { t: 'friendAdd'; nickname: string }
+  | { t: 'friendRespond'; nickname: string; accept: boolean }
+  /** Remove a friend, or cancel a request you sent. */
+  | { t: 'friendRemove'; nickname: string }
   | { t: 'create'; settings: TableSettings }
   | { t: 'join'; code: string }
   | { t: 'quick'; mode: string }
@@ -96,6 +116,10 @@ export type ServerMessage =
   | { t: 'account'; name: string; account: AccountView | null; why: 'login' | 'verified' | 'reset' | 'logout' }
   /** Information for the account forms ("check your email"). */
   | { t: 'notice'; kind: 'signup' | 'reset'; message: string }
+  /** Your friends and their status; sent when you log in and whenever it changes. */
+  | { t: 'friends'; friends: FriendsView }
+  /** A short message to show (e.g. "Friend request sent"). */
+  | { t: 'toast'; message: string }
   | { t: 'profile'; profile: Profile; ratingChange: number | null }
   | { t: 'table'; table: TableView }
   | { t: 'left' }

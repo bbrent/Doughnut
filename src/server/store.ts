@@ -63,6 +63,24 @@ export interface Repo {
   dropLinks(playerId: number, purpose: LinkPurpose): Promise<void>;
   recordGame(rec: GameRecord): Promise<Map<string, { profile: Profile; ratingChange: number | null }>>;
   leaderboard(limit: number): Promise<LeaderRow[]>;
+  /** Accepted friends, requests to this player, and requests from them. */
+  friendLists(playerId: number): Promise<FriendLists>;
+  /** Ask `to` to be friends; accepts at once if `to` had already asked `from`. */
+  requestFriend(from: number, to: number): Promise<'requested' | 'accepted' | 'already'>;
+  /** Accept a pending request from `requester`. Returns false if there was none. */
+  acceptFriend(requester: number, me: number): Promise<boolean>;
+  /** Remove a friendship or a request, in either direction. */
+  removeFriendship(a: number, b: number): Promise<void>;
+}
+
+export interface FriendRef {
+  id: number;
+  nickname: string;
+}
+export interface FriendLists {
+  friends: FriendRef[];
+  incoming: FriendRef[];
+  outgoing: FriendRef[];
 }
 
 const DEFAULT = rating();
@@ -144,6 +162,8 @@ export class MemoryRepo implements Repo {
   private sessions = new Map<string, number>();
   private links = new Map<string, { playerId: number; purpose: LinkPurpose; expiresAt: Date; used: boolean }>();
   private nextId = 1;
+  /** "from>to" -> status. Accepted friendships are stored in both directions. */
+  private friendships = new Map<string, 'pending' | 'accepted'>();
   games: GameRecord[] = [];
 
   constructor(private readonly now: () => number = Date.now) {}
@@ -184,6 +204,7 @@ export class MemoryRepo implements Repo {
   async deleteAccount(id: number) {
     this.players.delete(id);
     for (const [k, v] of this.sessions) if (v === id) this.sessions.delete(k);
+    for (const k of [...this.friendships.keys()]) if (k.split('>').map(Number).includes(id)) this.friendships.delete(k);
   }
   async purgeUnverified(maxAgeMs: number) {
     for (const p of [...this.players.values()]) {
@@ -228,6 +249,37 @@ export class MemoryRepo implements Repo {
     if (!rows.size) return new Map();
     this.games.push(rec);
     return applyGame(rec, rows).updates;
+  }
+  async friendLists(playerId: number) {
+    const ref = (id: number): FriendRef => ({ id, nickname: this.players.get(id)!.nickname });
+    const out: FriendLists = { friends: [], incoming: [], outgoing: [] };
+    for (const [k, status] of this.friendships) {
+      const [a, b] = k.split('>').map(Number);
+      if (!this.players.has(a) || !this.players.has(b)) continue;
+      if (a === playerId) (status === 'accepted' ? out.friends : out.outgoing).push(ref(b));
+      else if (b === playerId && status === 'pending') out.incoming.push(ref(a));
+    }
+    return out;
+  }
+  async requestFriend(from: number, to: number) {
+    const mine = this.friendships.get(`${from}>${to}`);
+    if (mine === 'accepted') return 'already' as const;
+    if (this.friendships.get(`${to}>${from}`) === 'pending') {
+      await this.acceptFriend(to, from);
+      return 'accepted' as const;
+    }
+    this.friendships.set(`${from}>${to}`, 'pending');
+    return 'requested' as const;
+  }
+  async acceptFriend(requester: number, me: number) {
+    if (this.friendships.get(`${requester}>${me}`) !== 'pending') return false;
+    this.friendships.set(`${requester}>${me}`, 'accepted');
+    this.friendships.set(`${me}>${requester}`, 'accepted');
+    return true;
+  }
+  async removeFriendship(a: number, b: number) {
+    this.friendships.delete(`${a}>${b}`);
+    this.friendships.delete(`${b}>${a}`);
   }
   async leaderboard(limit: number) {
     return [...this.players.values()]
@@ -277,6 +329,16 @@ const SCHEMA = [
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     KEY ix_player (player_id),
     CONSTRAINT fk_link_player FOREIGN KEY (player_id) REFERENCES players (id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  `CREATE TABLE IF NOT EXISTS friendships (
+    player_id INT UNSIGNED NOT NULL,
+    friend_id INT UNSIGNED NOT NULL,
+    status ENUM('pending', 'accepted') NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (player_id, friend_id),
+    KEY ix_friend (friend_id),
+    CONSTRAINT fk_fr_player FOREIGN KEY (player_id) REFERENCES players (id) ON DELETE CASCADE,
+    CONSTRAINT fk_fr_friend FOREIGN KEY (friend_id) REFERENCES players (id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   `CREATE TABLE IF NOT EXISTS games (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -501,6 +563,50 @@ export class MySqlRepo implements Repo {
     } finally {
       conn.release();
     }
+  }
+
+  async friendLists(playerId: number) {
+    const db = await this.db();
+    const [mine] = await db.execute(
+      `SELECT f.status, p.id, p.nickname FROM friendships f JOIN players p ON p.id = f.friend_id WHERE f.player_id = ? ORDER BY p.nickname`,
+      [playerId],
+    );
+    const [theirs] = await db.execute(
+      `SELECT p.id, p.nickname FROM friendships f JOIN players p ON p.id = f.player_id
+       WHERE f.friend_id = ? AND f.status = 'pending' ORDER BY p.nickname`,
+      [playerId],
+    );
+    const rows = mine as (FriendRef & { status: string })[];
+    const ref = (r: FriendRef) => ({ id: r.id, nickname: r.nickname });
+    return {
+      friends: rows.filter((r) => r.status === 'accepted').map(ref),
+      outgoing: rows.filter((r) => r.status === 'pending').map(ref),
+      incoming: (theirs as FriendRef[]).map(ref),
+    };
+  }
+  async requestFriend(from: number, to: number) {
+    const db = await this.db();
+    const [r] = await db.execute('SELECT status FROM friendships WHERE player_id = ? AND friend_id = ?', [from, to]);
+    if ((r as { status: string }[])[0]?.status === 'accepted') return 'already' as const;
+    if (await this.acceptFriend(to, from)) return 'accepted' as const;
+    await db.execute("INSERT IGNORE INTO friendships (player_id, friend_id, status) VALUES (?, ?, 'pending')", [from, to]);
+    return 'requested' as const;
+  }
+  async acceptFriend(requester: number, me: number) {
+    const db = await this.db();
+    const [res] = await db.execute(
+      "UPDATE friendships SET status = 'accepted' WHERE player_id = ? AND friend_id = ? AND status = 'pending'",
+      [requester, me],
+    );
+    if ((res as { affectedRows: number }).affectedRows !== 1) return false;
+    await db.execute(
+      "INSERT INTO friendships (player_id, friend_id, status) VALUES (?, ?, 'accepted') ON DUPLICATE KEY UPDATE status = 'accepted'",
+      [me, requester],
+    );
+    return true;
+  }
+  async removeFriendship(a: number, b: number) {
+    await (await this.db()).execute('DELETE FROM friendships WHERE (player_id = ? AND friend_id = ?) OR (player_id = ? AND friend_id = ?)', [a, b, b, a]);
   }
 
   async leaderboard(limit: number) {

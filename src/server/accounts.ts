@@ -12,7 +12,7 @@ import { AccountError, cleanNickname, type AccountInfo, type Accounts } from '..
 import type { GameRecord } from '../game/protocol';
 import { linkEmail, type Mailer } from './mailer';
 import { LoginThrottle, checkNewPassword, hashPassword, verifyPassword } from './password';
-import { emailKey, profileOf, sha256, type LeaderRow, type PlayerRow, type Repo } from './store';
+import { emailKey, profileOf, sha256, type FriendLists, type LeaderRow, type PlayerRow, type Repo } from './store';
 
 export interface AccountOptions {
   /** Base URL for links in emails, e.g. https://doughnut.example.com */
@@ -232,5 +232,43 @@ export class AccountService implements Accounts {
     this.throttle.success(emailKey(p.email ?? ''));
     this.throttle.success(p.nickname.toLowerCase());
     return info(p);
+  }
+
+  // ---- friends -----------------------------------------------------------------
+
+  async friendLists(accountId: string): Promise<FriendLists> {
+    return this.repo.friendLists(Number(accountId));
+  }
+
+  /** A confirmed account by nickname, other than the asker. */
+  private async friendTarget(accountId: string, nickname: string): Promise<PlayerRow> {
+    const p = await this.repo.byNickname(nickname);
+    if (!p?.verified_at) throw new AccountError(`No player called "${cleanNickname(nickname)}". Only signed-up players can be friends.`);
+    if (String(p.id) === accountId) throw new AccountError("That's you!");
+    return p;
+  }
+
+  async addFriend(accountId: string, nickname: string) {
+    const p = await this.friendTarget(accountId, nickname);
+    const lists = await this.repo.friendLists(Number(accountId));
+    if (lists.friends.length + lists.outgoing.length >= 200) throw new AccountError('Your friends list is full (200)');
+    const state = await this.repo.requestFriend(Number(accountId), p.id);
+    return { other: { id: String(p.id), nickname: p.nickname }, state };
+  }
+
+  async respondFriend(accountId: string, nickname: string, accept: boolean) {
+    const p = await this.friendTarget(accountId, nickname);
+    if (accept) {
+      if (!(await this.repo.acceptFriend(p.id, Number(accountId)))) throw new AccountError(`${p.nickname} hasn't asked to be friends`);
+    } else {
+      await this.repo.removeFriendship(p.id, Number(accountId));
+    }
+    return { id: String(p.id), nickname: p.nickname };
+  }
+
+  async removeFriend(accountId: string, nickname: string) {
+    const p = await this.friendTarget(accountId, nickname);
+    await this.repo.removeFriendship(Number(accountId), p.id);
+    return { id: String(p.id), nickname: p.nickname };
   }
 }

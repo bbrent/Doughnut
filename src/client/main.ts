@@ -1,6 +1,6 @@
 /** Web client: home, quick-match queue, lobby and game table. */
 import { MODES, RANKS, SUIT_SYMBOLS, rankOf, suitOf, type Card, type Move } from '../engine';
-import type { AccountView, BotLevel, ClientMessage, ServerMessage, TableSettings, TableView, WireObservation } from '../game/protocol';
+import type { AccountView, BotLevel, ClientMessage, FriendView, FriendsView, ServerMessage, TableSettings, TableView, WireObservation } from '../game/protocol';
 import { localConn, onlineConn, type Conn, type Status } from './conn';
 import { robotHtml } from './icons';
 import { chooseLayout, tableSvg } from './table-svg';
@@ -42,6 +42,7 @@ const st = {
   /** "Check your email" message shown in the account panel. */
   notice: null as { kind: 'signup' | 'reset'; message: string } | null,
   signupEmail: '',
+  friends: null as FriendsView | null,
   /** Signed-in account; null = guest (nothing saved). */
   account: null as AccountView | null,
   /** Which account form is open on the home screen. */
@@ -82,6 +83,7 @@ function onMessage(m: ServerMessage) {
       break;
     case 'account': {
       st.account = m.account;
+      if (!m.account) st.friends = null;
       st.helloName = m.name;
       st.authForm = null;
       st.notice = null;
@@ -98,6 +100,12 @@ function onMessage(m: ServerMessage) {
       loadLeaders();
       break;
     }
+    case 'friends':
+      st.friends = m.friends;
+      break;
+    case 'toast':
+      toast(m.message);
+      break;
     case 'notice':
       st.notice = { kind: m.kind, message: m.message };
       st.authForm = null;
@@ -286,11 +294,69 @@ function identityHtml(): string {
   </div>`;
 }
 
+function friendStatus(f: FriendView): string {
+  const t = f.table;
+  const mode = t ? MODES[t.mode]?.name ?? t.mode : '';
+  switch (f.status) {
+    case 'playing':
+      return `Playing ${esc(mode)} (${t!.humans} of ${t!.seats} people)${t!.joinable ? ' · can take a bot\'s seat' : ''}`;
+    case 'lobby':
+      return `Waiting at a table (${t!.humans} of ${t!.seats})`;
+    case 'over':
+      return 'Just finished a game';
+    case 'queue':
+      return 'Looking for a quick match';
+    case 'online':
+      return 'Online';
+    default:
+      return 'Offline';
+  }
+}
+
+function friendsHtml(): string {
+  if (!st.account) {
+    return `<div class="panel stack" style="margin-bottom:16px"><h2>Friends</h2>
+      <div class="small muted">Sign up to add friends and see when they're playing.</div></div>`;
+  }
+  const f = st.friends;
+  const incoming = (f?.incoming ?? [])
+    .map(
+      (n) => `<div class="friend"><span class="dot pending"></span><span class="fname">${esc(n)}</span><span class="fstatus">wants to be friends</span>
+        <span class="factions"><button class="primary small-btn" data-action="friend-accept" data-nick="${esc(n)}">Accept</button>
+        <button class="small-btn" data-action="friend-decline" data-nick="${esc(n)}">Decline</button></span></div>`,
+    )
+    .join('');
+  const rows = (f?.friends ?? [])
+    .map((x) => {
+      const join = x.table?.joinable ? `<button class="primary small-btn" data-action="friend-join" data-code="${x.table.code}">Join</button>` : '';
+      return `<div class="friend"><span class="dot ${x.status}"></span><span class="fname">${esc(x.nickname)}</span>
+        <span class="fstatus">${friendStatus(x)}</span>
+        <span class="factions">${join}<button class="small-btn quiet" title="Remove friend" aria-label="Remove ${esc(x.nickname)}" data-action="friend-remove" data-nick="${esc(x.nickname)}">✕</button></span></div>`;
+    })
+    .join('');
+  const outgoing = (f?.outgoing ?? [])
+    .map(
+      (n) => `<div class="friend"><span class="dot pending"></span><span class="fname">${esc(n)}</span><span class="fstatus">request sent</span>
+        <span class="factions"><button class="small-btn quiet" data-action="friend-remove" data-nick="${esc(n)}">Cancel</button></span></div>`,
+    )
+    .join('');
+  const empty = !incoming && !rows && !outgoing ? '<div class="small muted">No friends yet. Add someone by their nickname.</div>' : '';
+  return `<div class="panel stack" style="margin-bottom:16px">
+    <h2>Friends</h2>
+    <div class="row">
+      <input id="friend-nick" maxlength="20" placeholder="Friend's nickname" autocomplete="off" />
+      <button data-action="friend-add" style="flex:0 0 auto">Add friend</button>
+    </div>
+    <div class="friends">${incoming}${rows}${outgoing}</div>${empty}
+  </div>`;
+}
+
 function homeHtml(): string {
   return `
   <h1><span class="ring"></span>Doughnut</h1>
   <p class="sub">A trick-taking race to zero. Take tricks, dodge doughnuts.</p>
   ${identityHtml()}
+  ${friendsHtml()}
   <div class="grid">
     <div class="panel stack">
       <h2>Play online</h2>
@@ -561,6 +627,23 @@ app.addEventListener('click', (e) => {
     }
     case 'logout':
       send({ t: 'logout' });
+      return;
+    case 'friend-add': {
+      const nickname = val('friend-nick').trim();
+      if (nickname.length < 2) return toast("Enter your friend's nickname");
+      send({ t: 'friendAdd', nickname });
+      return;
+    }
+    case 'friend-accept':
+    case 'friend-decline':
+      send({ t: 'friendRespond', nickname: el.dataset.nick!, accept: el.dataset.action === 'friend-accept' });
+      return;
+    case 'friend-remove':
+      if (st.friends?.friends.some((x) => x.nickname === el.dataset.nick) && !confirm(`Remove ${el.dataset.nick} from your friends?`)) return;
+      send({ t: 'friendRemove', nickname: el.dataset.nick! });
+      return;
+    case 'friend-join':
+      send({ t: 'join', code: el.dataset.code! });
       return;
     case 'quick':
       if (needName()) return;

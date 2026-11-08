@@ -9,7 +9,7 @@
  * session when the same account logs in on several devices.
  */
 import { MODES, mulberry32, randInt, type Rng } from '../engine';
-import type { AccountView, ClientMessage, GameRecord, Profile, ServerMessage, TableSettings } from './protocol';
+import type { AccountView, ClientMessage, FriendView, FriendsView, GameRecord, Profile, ServerMessage, TableSettings } from './protocol';
 import { Table, TableError, type TableDeps, type User } from './table';
 
 export interface Client {
@@ -55,8 +55,24 @@ export interface Accounts {
   requestPasswordReset(email: string): Promise<void>;
   /** Set a new password from a reset link; logs out other browsers, logs this one in. */
   resetPassword(token: string, code: string, password: string): Promise<AccountInfo>;
+  friendLists(accountId: string): Promise<{ friends: FriendRef[]; incoming: FriendRef[]; outgoing: FriendRef[] }>;
+  addFriend(accountId: string, nickname: string): Promise<{ other: { id: string; nickname: string }; state: 'requested' | 'accepted' | 'already' }>;
+  respondFriend(accountId: string, nickname: string, accept: boolean): Promise<{ id: string; nickname: string }>;
+  removeFriend(accountId: string, nickname: string): Promise<{ id: string; nickname: string }>;
   /** Record a finished game; returns updated profiles by account id. */
   recordGame(record: GameRecord): Promise<Map<string, { profile: Profile; ratingChange: number | null }>>;
+}
+
+interface FriendRef {
+  id: number | string;
+  nickname: string;
+}
+
+/** A live account's friends: account id -> nickname. */
+interface FriendCache {
+  friends: Map<string, string>;
+  incoming: Map<string, string>;
+  outgoing: Map<string, string>;
 }
 
 export interface LobbyOptions {
@@ -81,6 +97,10 @@ export class Lobby {
   private byAccount = new Map<string, Session>();
   /** Sessions waiting for their sign-up to be confirmed, by pending account id. */
   private pendingSignup = new Map<string, Session>();
+  /** Friends of accounts that have been online, and each account's last broadcast status. */
+  private friendCache = new Map<string, FriendCache>();
+  private lastPresence = new Map<string, string>();
+  private tableKeys = new WeakMap<Table, string>();
   private tables = new Map<string, Table>();
   private members = new Map<Table, Set<Session>>();
   private queue: { session: Session; mode: string; since: number }[] = [];
@@ -143,6 +163,35 @@ export class Lobby {
         case 'logout':
           await this.logout(s, token);
           break;
+        case 'friendAdd': {
+          const me = this.requireAccount(s);
+          const r = await this.requireAccounts().addFriend(me, msg.nickname);
+          await this.reloadFriends(me, r.other.id);
+          const nick = r.other.nickname;
+          client.send({
+            t: 'toast',
+            message: { requested: `Friend request sent to ${nick}`, accepted: `You and ${nick} are now friends`, already: `${nick} is already your friend` }[r.state],
+          });
+          if (r.state === 'requested') this.sendTo(r.other.id, { t: 'toast', message: `${s.user.name} wants to be friends` });
+          if (r.state === 'accepted') this.sendTo(r.other.id, { t: 'toast', message: `You and ${s.user.name} are now friends` });
+          break;
+        }
+        case 'friendRespond': {
+          const me = this.requireAccount(s);
+          const other = await this.requireAccounts().respondFriend(me, msg.nickname, msg.accept);
+          await this.reloadFriends(me, other.id);
+          if (msg.accept) {
+            client.send({ t: 'toast', message: `You and ${other.nickname} are now friends` });
+            this.sendTo(other.id, { t: 'toast', message: `You and ${s.user.name} are now friends` });
+          }
+          break;
+        }
+        case 'friendRemove': {
+          const me = this.requireAccount(s);
+          const other = await this.requireAccounts().removeFriend(me, msg.nickname);
+          await this.reloadFriends(me, other.id);
+          break;
+        }
         case 'create':
           this.requireName(s);
           this.create(s, msg.settings);
@@ -183,6 +232,7 @@ export class Lobby {
       s.table?.setConnected(s.user.id, false);
       this.queue = this.queue.filter((q) => q.session !== s);
     }
+    this.presenceChanged(s.user.accountId);
   }
 
   // ---- identity ----------------------------------------------------------
@@ -243,6 +293,7 @@ export class Lobby {
       s.table.join(s.user); // reconnect to the same seat
       this.push(s.table);
     }
+    if (s.user.accountId) await this.friendsOnline(s.user.accountId);
     return token;
   }
 
@@ -287,6 +338,7 @@ export class Lobby {
       for (const c of mine) c.send({ t: 'account', name: existing.user.name, account: existing.account, why });
       if (existing.table) this.push(existing.table);
       else for (const c of mine) c.send({ t: 'left' });
+      await this.friendsOnline(acct.id);
       return;
     }
     if (s.user.accountId && s.user.accountId !== acct.id) throw new AccountError('Log out first');
@@ -297,6 +349,7 @@ export class Lobby {
     this.byAccount.set(acct.id, s);
     this.send(s, { t: 'account', name: s.user.name, account: s.account, why });
     if (s.table) this.push(s.table);
+    await this.friendsOnline(acct.id);
     // The browser that signed up is logged in too, if it's still here.
     const signedUpFrom = this.pendingSignup.get(acct.id);
     this.pendingSignup.delete(acct.id);
@@ -313,6 +366,7 @@ export class Lobby {
       from.user.accountId = to.user.accountId;
       from.account = to.account;
       this.send(from, { t: 'account', name: from.user.name, account: from.account, why: 'verified' });
+      this.sendFriends(to.user.accountId!);
       return;
     }
     this.leave(from, true);
@@ -323,6 +377,7 @@ export class Lobby {
       c.send({ t: 'left' });
     }
     from.clients.clear();
+    this.sendFriends(to.user.accountId!);
   }
 
   /** After a password reset: every other browser on this account becomes a guest. */
@@ -340,6 +395,7 @@ export class Lobby {
       }
       this.sessions.set(tok, guest);
     }
+    this.presenceChanged(accountId);
   }
 
   private async logout(s: Session, token: string): Promise<void> {
@@ -361,6 +417,7 @@ export class Lobby {
       c.send({ t: 'account', name: '', account: null, why: 'logout' });
       c.send({ t: 'left' });
     }
+    this.presenceChanged(s.user.accountId);
   }
 
   // ---- tables ------------------------------------------------------------
@@ -414,13 +471,16 @@ export class Lobby {
     t.leave(s.user.id);
     if (!quiet) this.send(s, { t: 'left' });
     if (t.humans().length === 0) this.removeTable(t);
+    this.presenceChanged(s.user.accountId);
   }
 
   private removeTable(t: Table): void {
     t.close();
-    for (const s of this.members.get(t) ?? []) s.table = null;
+    const members = [...(this.members.get(t) ?? [])];
+    for (const s of members) s.table = null;
     this.members.delete(t);
     this.tables.delete(t.code);
+    for (const s of members) this.presenceChanged(s.user.accountId);
   }
 
   private requireTable(s: Session): Table {
@@ -437,6 +497,7 @@ export class Lobby {
     this.tick();
     const pos = this.queue.findIndex((q) => q.session === s);
     if (pos >= 0) this.send(s, { t: 'queued', position: pos + 1 });
+    this.presenceChanged(s.user.accountId);
   }
 
   /**
@@ -488,8 +549,89 @@ export class Lobby {
 
   /** Send each seated human their own view of the table. */
   private push(t: Table): void {
-    for (const s of this.members.get(t) ?? []) {
-      this.send(s, { t: 'table', table: t.view(s.user.id) });
+    const members = this.members.get(t) ?? new Set<Session>();
+    for (const s of members) this.send(s, { t: 'table', table: t.view(s.user.id) });
+    // Friends only see status, players and free seats: skip the check on ordinary moves.
+    const key = `${t.status}|${t.humanCount()}|${t.joinable()}|${members.size}`;
+    if (this.tableKeys.get(t) !== key) {
+      this.tableKeys.set(t, key);
+      for (const s of members) this.presenceChanged(s.user.accountId);
+    }
+  }
+
+  // ---- friends -------------------------------------------------------------
+
+  private requireAccount(s: Session): string {
+    if (!s.user.accountId) throw new AccountError('Sign up to add friends');
+    return s.user.accountId;
+  }
+
+  /** All sessions on an account (several when it confirmed on another device mid-game). */
+  private sessionsOf(accountId: string): Session[] {
+    return [...new Set(this.sessions.values())].filter((s) => s.user.accountId === accountId);
+  }
+
+  private sendTo(accountId: string, msg: ServerMessage): void {
+    for (const s of this.sessionsOf(accountId)) this.send(s, msg);
+  }
+
+  /** What an account is doing, as its friends see it. */
+  private presenceOf(accountId: string): Omit<FriendView, 'nickname'> {
+    const live = this.sessionsOf(accountId).filter((s) => s.clients.size > 0);
+    if (!live.length) return { status: 'offline', table: null };
+    const atTable = live.find((s) => s.table?.status === 'playing') ?? live.find((s) => s.table);
+    if (atTable?.table) {
+      const t = atTable.table;
+      return {
+        status: t.status,
+        table: { code: t.code, mode: t.settings.mode, seats: t.settings.seats, humans: t.humanCount(), joinable: t.joinable() },
+      };
+    }
+    if (live.some((s) => this.queue.some((q) => q.session === s))) return { status: 'queue', table: null };
+    return { status: 'online', table: null };
+  }
+
+  private async loadFriends(accountId: string): Promise<void> {
+    if (!this.accounts) return;
+    const l = await this.accounts.friendLists(accountId);
+    const toMap = (refs: FriendRef[]) => new Map(refs.map((r) => [String(r.id), r.nickname]));
+    this.friendCache.set(accountId, { friends: toMap(l.friends), incoming: toMap(l.incoming), outgoing: toMap(l.outgoing) });
+  }
+
+  private sendFriends(accountId: string): void {
+    const c = this.friendCache.get(accountId);
+    if (!c) return;
+    const order = { playing: 0, lobby: 0, over: 1, queue: 2, online: 3, offline: 4 };
+    const friends = [...c.friends].map(([id, nickname]) => ({ nickname, ...this.presenceOf(id) }));
+    friends.sort((a, b) => order[a.status] - order[b.status] || a.nickname.localeCompare(b.nickname));
+    const view: FriendsView = { friends, incoming: [...c.incoming.values()], outgoing: [...c.outgoing.values()] };
+    this.sendTo(accountId, { t: 'friends', friends: view });
+  }
+
+  /** An account came online: load its friends, send them, and tell its friends. */
+  private async friendsOnline(accountId: string): Promise<void> {
+    if (!this.friendCache.has(accountId)) await this.loadFriends(accountId);
+    this.sendFriends(accountId);
+    this.presenceChanged(accountId);
+  }
+
+  /** After a friend request etc.: refresh both sides' lists. */
+  private async reloadFriends(...ids: string[]): Promise<void> {
+    for (const id of ids) {
+      if (!this.sessionsOf(id).length && !this.friendCache.has(id)) continue;
+      await this.loadFriends(id);
+      this.sendFriends(id);
+    }
+  }
+
+  /** If an account's status changed, update the lists of its friends who are online. */
+  private presenceChanged(accountId: string | null): void {
+    if (!accountId || !this.friendCache.has(accountId)) return;
+    const key = JSON.stringify(this.presenceOf(accountId));
+    if (this.lastPresence.get(accountId) === key) return;
+    this.lastPresence.set(accountId, key);
+    for (const friendId of this.friendCache.get(accountId)!.friends.keys()) {
+      if (this.sessionsOf(friendId).some((s) => s.clients.size > 0)) this.sendFriends(friendId);
     }
   }
 }

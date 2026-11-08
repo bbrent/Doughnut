@@ -146,3 +146,21 @@ details summary { cursor: pointer; }
 .robot-inline .robot-line { stroke: #4f9a8a; }
 
 .notice { background: color-mix(in srgb, var(--accent) 12%, var(--panel)); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 10px; padding: 10px 12px; }
+
+/* Friends */
+.friends { display: flex; flex-direction: column; }
+.friend { display: grid; grid-template-columns: 14px minmax(70px, auto) 1fr auto; gap: 8px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.friend:last-child { border-bottom: none; }
+.fname { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fstatus { font-size: 13px; color: var(--muted); }
+.factions { display: flex; gap: 6px; }
+.small-btn { padding: 4px 10px; font-size: 13px; }
+.small-btn.quiet { border-color: transparent; background: transparent; color: var(--muted); }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--line); }
+.dot.online, .dot.queue, .dot.over { background: var(--good); }
+.dot.lobby, .dot.playing { background: var(--accent); }
+.dot.pending { background: transparent; border: 2px dashed var(--muted); width: 8px; height: 8px; }
+@media (max-width: 520px) {
+  .friend { grid-template-columns: 14px 1fr auto; }
+  .fstatus { grid-column: 2 / 4; grid-row: 2; }
+}
