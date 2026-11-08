@@ -2,6 +2,7 @@
 import { MODES, RANKS, SUIT_SYMBOLS, rankOf, suitOf, type Card, type Move } from '../engine';
 import type { BotLevel, ClientMessage, ServerMessage, TableSettings, TableView, WireObservation } from '../game/protocol';
 import { localConn, onlineConn, type Conn, type Status } from './conn';
+import { chooseLayout, tableSvg } from './table-svg';
 
 // ---- persistent per-browser settings ---------------------------------------
 
@@ -211,41 +212,6 @@ function queueHtml(): string {
   </div>`;
 }
 
-function seatStrip(t: TableView, o: WireObservation | null): string {
-  return `<div class="seats">${t.seats
-    .map((seat, i) => {
-      const you = i === t.you;
-      const name = esc(seat.name) + (you ? ' (you)' : '');
-      if (!o) {
-        const tag = seat.kind === 'open' ? 'open' : seat.kind === 'bot' ? 'bot' : i === t.hostSeat ? 'host' : seat.connected ? '' : 'away';
-        return `<div class="seat ${you ? 'you' : ''}"><div class="name">${name}</div><div class="meta"><span>${tag}</span></div></div>`;
-      }
-      const pl = o.playing[i];
-      const status =
-        o.phase === 'declare' && pl === null ? (o.toAct === i ? 'deciding…' : 'to decide') : pl === false ? 'folded' : pl ? `${o.tricksWon[i]} trick${o.tricksWon[i] === 1 ? '' : 's'}` : '';
-      const badges = [i === o.dealer ? '<span class="badge">dealer</span>' : '', seat.kind === 'bot' ? '<span class="badge">bot</span>' : '', seat.covered ? '<span class="badge">away – bot playing</span>' : ''].join('');
-      return `<div class="seat ${you ? 'you' : ''} ${o.toAct === i ? 'turn' : ''} ${pl === false ? 'out' : ''}">
-        <div class="name">${name}${badges}</div>
-        <div class="meta"><span class="score">${o.scores[i]}</span><span>${status}</span></div>
-      </div>`;
-    })
-    .join('')}</div>`;
-}
-
-function trickHtml(t: TableView, o: WireObservation): string {
-  const name = (p: number) => (p === t.you ? 'You' : esc(t.seats[p].name));
-  if (o.currentTrick.length) {
-    return `<div class="trick">${o.currentTrick.map((p) => `<div class="play">${cardHtml(p.card)}<div>${name(p.player)}</div></div>`).join('')}</div>`;
-  }
-  const last = o.tricks[o.tricks.length - 1];
-  if (o.phase === 'play' && last) {
-    return `<div class="trick">${last.plays
-      .map((p) => `<div class="play ${p.player === last.winner ? 'win' : ''}">${cardHtml(p.card)}<div>${name(p.player)}</div></div>`)
-      .join('')}</div><div class="small" style="width:100%;text-align:center">${name(last.winner)} took the trick</div>`;
-  }
-  return '';
-}
-
 function promptAndHand(t: TableView, o: WireObservation): string {
   const yourTurn = o.toAct === t.you && o.legalMoves.length > 0;
   const kinds = new Set(o.legalMoves.map((m) => m.kind));
@@ -304,31 +270,32 @@ function tableHtml(t: TableView): string {
       <div><strong>${esc(mode.name)}</strong> <span class="muted small">${st.practice ? 'practice' : `table ${t.code}`}${o ? ` · hand ${o.handsPlayed + (o.phase === 'handOver' || o.phase === 'gameOver' ? 0 : 1)}` : ''}</span></div>
       <div><span class="conn ${conn === 'offline' ? 'offline' : ''}">${conn === 'offline' ? 'reconnecting…' : conn}</span> <button data-action="leave">Leave</button></div>
     </div>`;
+  const svg = tableSvg(t, chooseLayout(window.innerWidth));
 
   if (t.status === 'lobby') {
     const link = `${location.origin}${location.pathname}?t=${t.code}`;
     const isHost = t.you === t.hostSeat;
-    return `${header}
-      <div class="panel stack">
+    const overlay = `<div class="overlay"><div class="overlay-card stack">
         <h2>Waiting for players</h2>
         <div>Share code <span class="code">${t.code}</span> or this link:</div>
         <div class="row"><input readonly value="${esc(link)}" id="invite" /><button data-action="copy">Copy</button></div>
-        ${seatStrip(t, null)}
-        ${isHost ? `<button class="primary" data-action="start">Start game</button> <span class="small muted">Open seats become ${t.settings.botLevel} bots.</span>` : '<div class="muted">The host will start the game.</div>'}
-      </div>`;
+        ${isHost ? `<div><button class="primary" data-action="start">Start game</button></div><div class="small muted">Open seats become ${t.settings.botLevel} bots.</div>` : '<div class="muted">The host will start the game.</div>'}
+      </div></div>`;
+    return `${header}<div class="table-wrap">${svg}${overlay}</div>`;
   }
 
   if (!o) return header;
-  let middle = `<div class="turnup">${cardHtml(o.turnUp, { small: true })}<div>turn-up${o.dealerTookTurnUp ? ' (taken)' : ''}</div><div>trump ${o.trump === null ? '' : SUIT_SYMBOLS[o.trump]}</div></div>${trickHtml(t, o)}`;
+  let overlay = '';
   let bottom = promptAndHand(t, o);
   if (t.status === 'over') {
     const winners = t.winners.map((w) => (w === t.you ? 'You' : esc(t.seats[w].name))).join(' & ');
-    middle = `<div style="text-align:center;width:100%"><h2>${winners} win${t.winners.length === 1 && t.winners[0] !== t.you ? 's' : ''}!</h2>${resultsHtml(t, o)}</div>`;
+    overlay = `<div class="overlay"><div class="overlay-card"><h2>${winners} win${t.winners.length === 1 && t.winners[0] !== t.you ? 's' : ''}!</h2>${resultsHtml(t, o)}</div></div>`;
     bottom = `<div class="prompt"><div class="actions">${t.you === t.hostSeat ? '<button class="primary" data-action="start">Play again</button>' : '<span class="muted">The host can start a rematch.</span>'}<button data-action="leave">Leave</button></div></div>`;
   } else if (o.phase === 'handOver') {
-    middle = `<div style="width:100%"><h2 style="text-align:center">Hand over</h2>${resultsHtml(t, o)}<div class="small" style="text-align:center;margin-top:6px">Next hand starting…</div></div>`;
+    overlay = `<div class="overlay"><div class="overlay-card"><h2>Hand over</h2>${resultsHtml(t, o)}<div class="small muted" style="margin-top:6px">Next hand starting…</div></div></div>`;
+    bottom = '';
   }
-  return `${header}<div class="felt">${seatStrip(t, o)}<div class="middle">${middle}</div>${bottom}</div>`;
+  return `${header}<div class="table-wrap">${svg}${overlay}</div>${bottom ? `<div class="below">${bottom}</div>` : ''}`;
 }
 
 function render() {
@@ -345,6 +312,13 @@ function tickCountdown() {
   }
 }
 setInterval(tickCountdown, 250);
+
+let lastPortrait = window.innerWidth < 640;
+window.addEventListener('resize', () => {
+  const portrait = window.innerWidth < 640;
+  if (portrait !== lastPortrait && st.screen === 'table') render();
+  lastPortrait = portrait;
+});
 
 // ---- actions -----------------------------------------------------------------
 
