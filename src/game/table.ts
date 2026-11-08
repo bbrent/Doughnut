@@ -54,6 +54,8 @@ export const DEFAULT_TIMING: Timing = {
 export interface User {
   id: string;
   name: string;
+  /** Saved account id; null for guests. May be set mid-game when a guest registers. */
+  accountId: string | null;
 }
 
 type Seat =
@@ -273,6 +275,7 @@ export class Table {
         const stillHere = !!orig && seat.kind === 'human' && seat.user.id === orig.id;
         return {
           userId: orig?.id ?? null,
+          accountId: orig?.accountId ?? null,
           name: orig?.name ?? (seat.kind === 'bot' ? seat.name : 'Open seat'),
           botLevel: orig ? null : this.settings.botLevel,
           finalScore: s.scores[i],

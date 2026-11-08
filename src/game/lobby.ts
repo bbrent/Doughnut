@@ -1,10 +1,15 @@
 /**
- * Lobby: users, table codes, quick match, and routing of client messages.
- * Transport-agnostic: a "client" is anything with send(). The WebSocket
- * server (src/server) is a thin wrapper around this.
+ * Lobby: players, accounts, table codes, quick match, and routing of client
+ * messages. Transport-agnostic: a "client" is anything with send(). The
+ * WebSocket server (src/server) is a thin wrapper around this.
+ *
+ * Players start as guests with a nickname; nothing about a guest is saved.
+ * A guest can register (set a password for their nickname); from then on
+ * their games and rating are saved. Several browser tokens can share one
+ * session when the same account logs in on several devices.
  */
 import { MODES, mulberry32, randInt, type Rng } from '../engine';
-import type { ClientMessage, GameRecord, Profile, ServerMessage, TableSettings } from './protocol';
+import type { AccountView, ClientMessage, GameRecord, Profile, ServerMessage, TableSettings } from './protocol';
 import { Table, TableError, type TableDeps, type User } from './table';
 
 export interface Client {
@@ -12,19 +17,35 @@ export interface Client {
 }
 
 interface Session {
-  token: string;
   user: User;
-  clients: Set<Client>;
+  account: AccountView | null;
+  /** Connected clients and the browser token each one used. */
+  clients: Map<Client, string>;
   table: Table | null;
 }
 
+export interface AccountInfo {
+  id: string;
+  nickname: string;
+  profile: Profile;
+}
+
+/** A problem the player should see (wrong password, nickname taken, ...). */
+export class AccountError extends Error {}
+
 /**
- * Optional persistence (the server's MySQL store). Without it, users are
- * identified for the life of the process only and nothing is recorded.
+ * Accounts and records (the server's MySQL store). Without it, everyone is a
+ * guest and nothing is recorded.
  */
 export interface Accounts {
-  identify(token: string, name: string): Promise<{ id: string; profile: Profile }>;
-  /** Record a finished game; returns updated profiles for the humans in it. */
+  /** The account this browser token is logged in to, if any. */
+  sessionAccount(token: string): Promise<AccountInfo | null>;
+  isRegistered(nickname: string): Promise<boolean>;
+  /** Save `nickname` with a password and log this token in to it. */
+  register(token: string, nickname: string, password: string): Promise<AccountInfo>;
+  login(token: string, nickname: string, password: string): Promise<AccountInfo>;
+  logout(token: string): Promise<void>;
+  /** Record a finished game; returns updated profiles by account id. */
   recordGame(record: GameRecord): Promise<Map<string, { profile: Profile; ratingChange: number | null }>>;
 }
 
@@ -40,12 +61,19 @@ export const DEFAULT_LOBBY: LobbyOptions = { quickSeats: 4, quickWaitMs: 10_000,
 
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 
+/** Nicknames: 2-20 letters, digits, spaces and _ . ' - */
+export function cleanNickname(name: string): string {
+  return name.replace(/[^\p{L}\p{N} _.'-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 20);
+}
+
 export class Lobby {
   private sessions = new Map<string, Session>(); // by token
+  private byAccount = new Map<string, Session>();
   private tables = new Map<string, Table>();
   private members = new Map<Table, Set<Session>>();
-  private queue: { token: string; mode: string; since: number }[] = [];
+  private queue: { session: Session; mode: string; since: number }[] = [];
   private rng: Rng;
+  private guests = 0;
   readonly opts: LobbyOptions;
 
   constructor(
@@ -75,13 +103,25 @@ export class Lobby {
       if (!token) throw new TableError('Say hello first');
       const s = this.sessions.get(token)!;
       switch (msg.t) {
+        case 'register':
+          await this.register(s, token, msg.password);
+          break;
+        case 'login':
+          await this.login(s, token, msg.nickname, msg.password);
+          break;
+        case 'logout':
+          await this.logout(s, token);
+          break;
         case 'create':
+          this.requireName(s);
           this.create(s, msg.settings);
           break;
         case 'join':
+          this.requireName(s);
           this.join(s, msg.code);
           break;
         case 'quick':
+          this.requireName(s);
           this.enqueue(s, msg.mode);
           break;
         case 'start':
@@ -95,7 +135,9 @@ export class Lobby {
           break;
       }
     } catch (e) {
-      client.send({ t: 'error', message: e instanceof Error ? e.message : String(e) });
+      const shown = e instanceof TableError || e instanceof AccountError;
+      if (!shown) console.error('lobby error:', e);
+      client.send({ t: 'error', message: shown ? (e as Error).message : 'Something went wrong. Please try again.' });
     }
     return token;
   }
@@ -108,37 +150,144 @@ export class Lobby {
     s.clients.delete(client);
     if (s.clients.size === 0) {
       s.table?.setConnected(s.user.id, false);
-      this.queue = this.queue.filter((q) => q.token !== token);
+      this.queue = this.queue.filter((q) => q.session !== s);
     }
   }
 
-  private async hello(client: Client, token: string, name: string): Promise<string> {
+  // ---- identity ----------------------------------------------------------
+
+  private inGame(s: Session) {
+    return !!s.table && s.table.status === 'playing';
+  }
+
+  private newSession(user: User, account: AccountView | null): Session {
+    const s: Session = { user, account, clients: new Map(), table: null };
+    if (user.accountId) this.byAccount.set(user.accountId, s);
+    return s;
+  }
+
+  private guestUser(name: string): User {
+    return { id: `g${++this.guests}`, name, accountId: null };
+  }
+
+  /** A guest may not use a nickname someone has registered. ('Guest' = not chosen yet.) */
+  private async checkGuestName(name: string): Promise<void> {
+    if (name === 'Guest') return;
+    if (/^bot\b/i.test(name)) throw new AccountError('Pick a nickname that doesn\'t start with "Bot"');
+    if (this.accounts && (await this.accounts.isRegistered(name))) {
+      throw new AccountError(`"${name}" is a registered nickname. Log in, or pick another.`);
+    }
+  }
+
+  private send(s: Session, msg: ServerMessage) {
+    for (const c of s.clients.keys()) c.send(msg);
+  }
+
+  private async hello(client: Client, token: string, name: string): Promise<string | null> {
     if (!/^[A-Za-z0-9_-]{16,64}$/.test(token)) throw new TableError('Bad token');
-    const clean = name.replace(/[^\p{L}\p{N} _.'-]/gu, '').trim().slice(0, 20) || 'Player';
+    const chosen = cleanNickname(name);
+    const nick = chosen.length >= 2 ? chosen : 'Guest';
     let s = this.sessions.get(token);
-    const canRename = !s || !s.table || s.table.status === 'lobby'; // not mid-game
-    let profile: Profile | null = null;
-    if (this.accounts) {
-      const ident = await this.accounts.identify(token, canRename ? clean : s!.user.name);
-      profile = ident.profile;
+    if (!s) {
+      const acct = this.accounts ? await this.accounts.sessionAccount(token) : null;
+      if (!acct) await this.checkGuestName(nick);
       s = this.sessions.get(token); // may have been created while we waited
       if (!s) {
-        s = { token, user: { id: ident.id, name: ident.profile.name }, clients: new Set(), table: null };
+        if (acct) {
+          s =
+            this.byAccount.get(acct.id) ??
+            this.newSession({ id: `a${acct.id}`, name: acct.nickname, accountId: acct.id }, { nickname: acct.nickname, profile: acct.profile });
+        } else {
+          s = this.newSession(this.guestUser(nick), null);
+        }
         this.sessions.set(token, s);
       }
-    } else if (!s) {
-      s = { token, user: { id: `u${this.sessions.size + 1}`, name: clean }, clients: new Set(), table: null };
-      this.sessions.set(token, s);
+    } else if (!s.user.accountId && !this.inGame(s) && nick !== s.user.name) {
+      await this.checkGuestName(nick); // a guest changing nickname
+      s.user.name = nick;
+      if (s.table) this.push(s.table);
     }
-    if (canRename) s.user.name = clean;
-    s.clients.add(client);
-    client.send({ t: 'welcome', name: s.user.name, profile });
+    s.clients.set(client, token);
+    client.send({ t: 'welcome', name: s.user.name, account: s.account });
     if (s.table) {
       s.table.join(s.user); // reconnect to the same seat
       this.push(s.table);
     }
     return token;
   }
+
+  private requireName(s: Session) {
+    if (!s.user.accountId && s.user.name === 'Guest') throw new AccountError('Pick a nickname first');
+  }
+
+  private requireAccounts(): Accounts {
+    if (!this.accounts) throw new AccountError("Saving progress isn't available here");
+    return this.accounts;
+  }
+
+  /** Guest -> account: save the current nickname with a password. */
+  private async register(s: Session, token: string, password: string): Promise<void> {
+    if (s.user.accountId) throw new AccountError("You're already registered");
+    this.requireName(s);
+    const acct = await this.requireAccounts().register(token, s.user.name, password);
+    s.user.accountId = acct.id; // same User object, so a game in progress gets recorded for the account
+    s.user.name = acct.nickname;
+    s.account = { nickname: acct.nickname, profile: acct.profile };
+    this.byAccount.set(acct.id, s);
+    this.send(s, { t: 'account', name: s.user.name, account: s.account });
+    if (s.table) this.push(s.table);
+  }
+
+  private async login(s: Session, token: string, nickname: string, password: string): Promise<void> {
+    if (s.user.accountId) throw new AccountError('Log out first');
+    if (this.inGame(s)) throw new AccountError('Finish or leave your game before logging in');
+    const acct = await this.requireAccounts().login(token, cleanNickname(nickname), password);
+    const view = { nickname: acct.nickname, profile: acct.profile };
+    const existing = this.byAccount.get(acct.id);
+    // This browser's clients (all tabs share the token) move to the account's session.
+    const mine = [...s.clients].filter(([, tok]) => tok === token).map(([c]) => c);
+    if (existing && existing !== s) {
+      this.leave(s, true);
+      for (const c of mine) {
+        s.clients.delete(c);
+        existing.clients.set(c, token);
+      }
+      this.sessions.set(token, existing);
+      for (const c of mine) c.send({ t: 'account', name: existing.user.name, account: existing.account });
+      if (existing.table) this.push(existing.table);
+      else for (const c of mine) c.send({ t: 'left' });
+    } else {
+      s.user.accountId = acct.id;
+      s.user.name = acct.nickname;
+      s.account = view;
+      this.byAccount.set(acct.id, s);
+      this.send(s, { t: 'account', name: s.user.name, account: s.account });
+      if (s.table) this.push(s.table);
+    }
+  }
+
+  private async logout(s: Session, token: string): Promise<void> {
+    if (!s.user.accountId) throw new AccountError("You're not logged in");
+    if (this.inGame(s)) throw new AccountError('Finish or leave your game before logging out');
+    await this.requireAccounts().logout(token);
+    const mine = [...s.clients].filter(([, tok]) => tok === token).map(([c]) => c);
+    for (const c of mine) s.clients.delete(c);
+    const stillUsed = [...this.sessions.entries()].some(([tok, other]) => other === s && tok !== token);
+    if (!stillUsed) {
+      this.leave(s, true);
+      this.byAccount.delete(s.user.accountId);
+    }
+    // This browser continues as a guest who still has to pick a nickname.
+    const guest = this.newSession(this.guestUser('Guest'), null);
+    for (const c of mine) guest.clients.set(c, token);
+    this.sessions.set(token, guest);
+    for (const c of mine) {
+      c.send({ t: 'account', name: '', account: null });
+      c.send({ t: 'left' });
+    }
+  }
+
+  // ---- tables ------------------------------------------------------------
 
   private newCode(): string {
     for (;;) {
@@ -181,13 +330,13 @@ export class Lobby {
   }
 
   private leave(s: Session, quiet = false): void {
-    this.queue = this.queue.filter((q) => q.token !== s.token);
+    this.queue = this.queue.filter((q) => q.session !== s);
     const t = s.table;
     if (!t) return;
     s.table = null;
     this.members.get(t)?.delete(s);
     t.leave(s.user.id);
-    if (!quiet) for (const c of s.clients) c.send({ t: 'left' });
+    if (!quiet) this.send(s, { t: 'left' });
     if (t.humans().length === 0) this.removeTable(t);
   }
 
@@ -208,10 +357,10 @@ export class Lobby {
   private enqueue(s: Session, mode: string): void {
     if (!MODES[mode]) throw new TableError(`Unknown mode ${mode}`);
     this.leave(s, true);
-    if (!this.queue.some((q) => q.token === s.token)) this.queue.push({ token: s.token, mode, since: this.now() });
+    if (!this.queue.some((q) => q.session === s)) this.queue.push({ session: s, mode, since: this.now() });
     this.tick();
-    const pos = this.queue.findIndex((q) => q.token === s.token);
-    if (pos >= 0) for (const c of s.clients) c.send({ t: 'queued', position: pos + 1 });
+    const pos = this.queue.findIndex((q) => q.session === s);
+    if (pos >= 0) this.send(s, { t: 'queued', position: pos + 1 });
   }
 
   /**
@@ -229,7 +378,7 @@ export class Lobby {
         if (!full && !stale) break;
         const group = waiting.slice(0, this.opts.quickSeats);
         this.queue = this.queue.filter((q) => !group.includes(q));
-        const sessions = group.map((q) => this.sessions.get(q.token)!);
+        const sessions = group.map((q) => q.session);
         const t = this.makeTable(sessions[0].user, { mode, seats: this.opts.quickSeats, botLevel: 'hard' });
         for (const s of sessions) {
           if (s !== sessions[0]) t.join(s.user);
@@ -244,15 +393,17 @@ export class Lobby {
     }
   }
 
-  /** Record a finished game and tell its players their new ratings. */
+  /** Record a finished game (accounts only) and tell its players their new ratings. */
   private gameOver(t: Table, rec: GameRecord): void {
-    if (!this.accounts) return;
+    if (!this.accounts || !rec.seats.some((s) => s.accountId)) return;
     this.accounts
       .recordGame(rec)
       .then((updates) => {
-        for (const s of this.sessions.values()) {
-          const u = updates.get(s.user.id);
-          if (u) for (const c of s.clients) c.send({ t: 'profile', profile: u.profile, ratingChange: u.ratingChange });
+        for (const [id, u] of updates) {
+          const s = this.byAccount.get(id);
+          if (!s) continue;
+          s.account = { nickname: s.user.name, profile: u.profile };
+          this.send(s, { t: 'profile', profile: u.profile, ratingChange: u.ratingChange });
         }
       })
       .catch((e) => console.error(`Could not record game ${t.code}:`, e));
@@ -261,8 +412,7 @@ export class Lobby {
   /** Send each seated human their own view of the table. */
   private push(t: Table): void {
     for (const s of this.members.get(t) ?? []) {
-      const msg: ServerMessage = { t: 'table', table: t.view(s.user.id) };
-      for (const c of s.clients) c.send(msg);
+      this.send(s, { t: 'table', table: t.view(s.user.id) });
     }
   }
 }

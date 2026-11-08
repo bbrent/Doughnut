@@ -54,6 +54,8 @@ export interface GameRecord {
   seats: {
     /** The human who started in this seat (null for bots). */
     userId: string | null;
+    /** Their saved account, if they have one (guests: null). Only accounts are recorded and rated. */
+    accountId: string | null;
     name: string;
     botLevel: BotLevel | null;
     finalScore: number;
@@ -62,8 +64,18 @@ export interface GameRecord {
   }[];
 }
 
+/** The signed-in account, or null for a guest. */
+export interface AccountView {
+  nickname: string;
+  profile: Profile;
+}
+
 export type ClientMessage =
   | { t: 'hello'; token: string; name: string }
+  /** Save the current nickname with a password (guest -> account). */
+  | { t: 'register'; password: string }
+  | { t: 'login'; nickname: string; password: string }
+  | { t: 'logout' }
   | { t: 'create'; settings: TableSettings }
   | { t: 'join'; code: string }
   | { t: 'quick'; mode: string }
@@ -72,7 +84,9 @@ export type ClientMessage =
   | { t: 'leave' };
 
 export type ServerMessage =
-  | { t: 'welcome'; name: string; profile: Profile | null }
+  | { t: 'welcome'; name: string; account: AccountView | null }
+  /** Sent after register / login / logout. */
+  | { t: 'account'; name: string; account: AccountView | null }
   | { t: 'profile'; profile: Profile; ratingChange: number | null }
   | { t: 'table'; table: TableView }
   | { t: 'left' }

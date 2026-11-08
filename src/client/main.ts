@@ -1,6 +1,6 @@
 /** Web client: home, quick-match queue, lobby and game table. */
 import { MODES, RANKS, SUIT_SYMBOLS, rankOf, suitOf, type Card, type Move } from '../engine';
-import type { BotLevel, ClientMessage, Profile, ServerMessage, TableSettings, TableView, WireObservation } from '../game/protocol';
+import type { AccountView, BotLevel, ClientMessage, ServerMessage, TableSettings, TableView, WireObservation } from '../game/protocol';
 import { localConn, onlineConn, type Conn, type Status } from './conn';
 import { chooseLayout, tableSvg } from './table-svg';
 
@@ -35,7 +35,14 @@ const st = {
   table: null as TableView | null,
   queuePos: 0,
   joinCode: new URLSearchParams(location.search).get('t')?.toUpperCase() ?? '',
-  profile: null as Profile | null,
+  /** Signed-in account; null = guest (nothing saved). */
+  account: null as AccountView | null,
+  /** Which account form is open on the home screen. */
+  authForm: null as 'register' | 'login' | null,
+  /** The nickname the server last accepted, to know when to re-introduce ourselves. */
+  helloName: null as string | null,
+  /** The account action in flight, for the confirmation message. */
+  pendingAuth: null as 'register' | 'login' | null,
   ratingChange: null as number | null,
   leaders: null as { name: string; rating: number; games: number; wins: number }[] | null,
 };
@@ -63,10 +70,24 @@ function toast(msg: string) {
 function onMessage(m: ServerMessage) {
   switch (m.t) {
     case 'welcome':
-      if (!st.practice) st.profile = m.profile;
+      if (st.practice) break;
+      st.account = m.account;
+      st.helloName = m.name;
+      if (m.account) setName(m.account.nickname);
       break;
+    case 'account': {
+      const action = st.pendingAuth;
+      st.pendingAuth = null;
+      st.account = m.account;
+      st.helloName = m.name;
+      st.authForm = null;
+      setName(m.name);
+      toast(!m.account ? 'Logged out' : action === 'register' ? `Saved. Games as ${m.account.nickname} now count.` : `Logged in as ${m.account.nickname}`);
+      loadLeaders();
+      break;
+    }
     case 'profile':
-      st.profile = m.profile;
+      if (st.account) st.account.profile = m.profile;
       st.ratingChange = m.ratingChange;
       if (m.ratingChange !== null && m.profile.rating !== null) {
         toast(`Rating ${m.profile.rating - m.ratingChange} → ${m.profile.rating} (${m.ratingChange >= 0 ? '+' : ''}${m.ratingChange})`);
@@ -87,6 +108,9 @@ function onMessage(m: ServerMessage) {
       backHome();
       break;
     case 'error':
+      st.pendingAuth = null;
+      // Until the server accepts our nickname, later messages only add "Say hello first".
+      if (st.helloName === null && m.message === 'Say hello first') break;
       toast(m.message);
       break;
   }
@@ -168,22 +192,63 @@ const levelOptions = (sel: string) =>
 
 // ---- screens -----------------------------------------------------------------
 
+const insecure = location.protocol === 'http:' && !['localhost', '127.0.0.1'].includes(location.hostname);
+
+function identityHtml(): string {
+  const invite = st.joinCode ? `<h2>You're invited to table <span class="code">${esc(st.joinCode)}</span></h2>` : '';
+  const joinBtn = st.joinCode ? '<button class="primary" data-action="join" style="flex:0 0 auto">Join table</button>' : '';
+  if (st.account) {
+    const p = st.account.profile;
+    return `<div class="panel stack" style="margin-bottom:16px">${invite}
+      <div class="row" style="align-items:center">
+        <div><strong>${esc(st.account.nickname)}</strong>
+          <span class="pill">Rating ${p.rating} · ${p.games} game${p.games === 1 ? '' : 's'} · ${p.wins} win${p.wins === 1 ? '' : 's'}</span></div>
+        ${joinBtn}<button data-action="logout" style="flex:0 0 auto">Log out</button>
+      </div>
+    </div>`;
+  }
+  const warn = insecure ? '<div class="small bad">This page isn\'t using HTTPS, so a password could be seen on the network.</div>' : '';
+  let form = '';
+  if (st.authForm === 'register') {
+    form = `<div class="stack auth">
+      <div class="small">Choose a password for <strong>${esc(st.name.trim() || 'your nickname')}</strong>. From then on your games and rating are saved, and nobody else can use this nickname.</div>
+      <div class="row">
+        <input id="pw1" type="password" autocomplete="new-password" placeholder="Password (6+ characters)" />
+        <input id="pw2" type="password" autocomplete="new-password" placeholder="Repeat password" />
+      </div>
+      ${warn}
+      <div class="row"><button class="primary" data-action="do-register">Save my nickname</button><button data-action="auth-cancel">Cancel</button></div>
+    </div>`;
+  } else if (st.authForm === 'login') {
+    form = `<div class="stack auth">
+      <div class="row">
+        <input id="login-nick" autocomplete="username" maxlength="20" placeholder="Nickname" value="${esc(st.name)}" />
+        <input id="login-pw" type="password" autocomplete="current-password" placeholder="Password" />
+      </div>
+      ${warn}
+      <div class="row"><button class="primary" data-action="do-login">Log in</button><button data-action="auth-cancel">Cancel</button></div>
+    </div>`;
+  }
+  return `<div class="panel stack" style="margin-bottom:16px">${invite}
+    <label for="name">Nickname</label>
+    <div class="row">
+      <input id="name" maxlength="20" autocomplete="nickname" placeholder="Name shown at the table" value="${esc(st.name)}" />
+      ${joinBtn}
+    </div>
+    ${
+      form ||
+      `<div class="small muted">Playing as a guest: your games aren't saved.
+        <a href="#" data-action="auth-register">Save my progress</a> (set a password) ·
+        <a href="#" data-action="auth-login">Log in</a></div>`
+    }
+  </div>`;
+}
+
 function homeHtml(): string {
   return `
   <h1><span class="ring"></span>Doughnut</h1>
-  <p class="sub">A trick-taking race to zero. Take tricks, dodge doughnuts.${
-    st.profile && st.profile.rating !== null
-      ? ` <span class="pill">Rating ${st.profile.rating} · ${st.profile.games} game${st.profile.games === 1 ? '' : 's'} · ${st.profile.wins} win${st.profile.wins === 1 ? '' : 's'}</span>`
-      : ''
-  }</p>
-  <div class="panel stack" style="margin-bottom:16px">
-    ${st.joinCode ? `<h2>You're invited to table <span class="code">${esc(st.joinCode)}</span></h2>` : ''}
-    <label for="name">Your name</label>
-    <div class="row">
-      <input id="name" maxlength="20" placeholder="Name shown at the table" value="${esc(st.name)}" />
-      ${st.joinCode ? '<button class="primary" data-action="join" style="flex:0 0 auto">Join table</button>' : ''}
-    </div>
-  </div>
+  <p class="sub">A trick-taking race to zero. Take tricks, dodge doughnuts.</p>
+  ${identityHtml()}
   <div class="grid">
     <div class="panel stack">
       <h2>Play online</h2>
@@ -238,7 +303,7 @@ function leadersHtml(): string {
     ? `<table class="results"><tr><th>#</th><th>Player</th><th>Rating</th><th>Games</th><th>Wins</th></tr>${st.leaders
         .map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.name)}</td><td>${r.rating}</td><td>${r.games}</td><td>${r.wins}</td></tr>`)
         .join('')}</table>`
-    : '<div class="muted small">No rated games yet. Games with two or more people are rated.</div>';
+    : '<div class="muted small">No rated games yet. Games with two or more registered players are rated.</div>';
   return `<div class="panel" style="margin-top:16px"><h2>Leaderboard</h2>${rows}</div>`;
 }
 
@@ -330,7 +395,11 @@ function tableHtml(t: TableView): string {
     const winners = t.winners.map((w) => (w === t.you ? 'You' : esc(t.seats[w].name))).join(' & ');
     const rc = st.ratingChange;
     const ratingLine =
-      rc !== null && st.profile?.rating != null ? `<div class="small" style="margin-top:8px">Your rating: ${st.profile.rating} (${rc >= 0 ? '+' : ''}${rc})</div>` : '';
+      rc !== null && st.account
+        ? `<div class="small" style="margin-top:8px">Your rating: ${st.account.profile.rating} (${rc >= 0 ? '+' : ''}${rc})</div>`
+        : !st.account && !st.practice
+          ? '<div class="small muted" style="margin-top:8px">Playing as a guest, so this game wasn\'t saved. Set a password for your nickname on the home screen to keep your record.</div>'
+          : '';
     overlay = `<div class="overlay"><div class="overlay-card"><h2>${winners} win${t.winners.length === 1 && t.winners[0] !== t.you ? 's' : ''}!</h2>${resultsHtml(t, o)}${ratingLine}</div></div>`;
     bottom = `<div class="prompt"><div class="actions">${t.you === t.hostSeat ? '<button class="primary" data-action="start">Play again</button>' : '<span class="muted">The host can start a rematch.</span>'}<button data-action="leave">Leave</button></div></div>`;
   } else if (o.phase === 'handOver') {
@@ -366,14 +435,22 @@ window.addEventListener('resize', () => {
 
 const val = (id: string) => (document.getElementById(id) as HTMLInputElement | HTMLSelectElement | null)?.value ?? '';
 
+function setName(n: string) {
+  st.name = n;
+  store('doughnut-name', n);
+}
+
+/** Make sure we have a nickname, and that the server knows the current one. */
 function needName(): boolean {
-  st.name = val('name').trim() || st.name;
-  if (!st.name) {
-    toast('Enter your name first');
+  if (!st.account) setName((val('name') || st.name).trim());
+  if (st.name.length < 2) {
+    toast('Pick a nickname first');
     document.getElementById('name')?.focus();
     return true;
   }
-  store('doughnut-name', st.name);
+  if (st.conn && !st.practice && st.helloName !== st.name) {
+    st.conn.send({ t: 'hello', token, name: st.name });
+  }
   return false;
 }
 
@@ -384,8 +461,40 @@ function move(m: Move) {
 app.addEventListener('click', (e) => {
   const el = (e.target as HTMLElement).closest<HTMLElement>('[data-action]');
   if (!el) return;
+  if (el.tagName === 'A') e.preventDefault();
   const card = Number(el.dataset.card);
   switch (el.dataset.action) {
+    case 'auth-register':
+    case 'auth-login':
+      st.name = val('name').trim() || st.name;
+      st.authForm = el.dataset.action === 'auth-register' ? 'register' : 'login';
+      render();
+      document.getElementById(st.authForm === 'register' ? 'pw1' : 'login-pw')?.focus();
+      return;
+    case 'auth-cancel':
+      st.authForm = null;
+      render();
+      return;
+    case 'do-register': {
+      if (needName()) return;
+      const pw = val('pw1');
+      if (pw.length < 6) return toast('Use a password of at least 6 characters');
+      if (pw !== val('pw2')) return toast("The passwords don't match");
+      st.pendingAuth = 'register';
+      online().send({ t: 'register', password: pw });
+      return;
+    }
+    case 'do-login': {
+      const nickname = val('login-nick').trim();
+      const password = val('login-pw');
+      if (!nickname || !password) return toast('Enter your nickname and password');
+      st.pendingAuth = 'login';
+      online().send({ t: 'login', nickname, password });
+      return;
+    }
+    case 'logout':
+      send({ t: 'logout' });
+      return;
     case 'quick':
       if (needName()) return;
       online().send({ t: 'quick', mode: 'doughnut' });
@@ -447,10 +556,7 @@ app.addEventListener('click', (e) => {
 
 app.addEventListener('input', (e) => {
   const t = e.target as HTMLInputElement;
-  if (t.id === 'name') {
-    st.name = t.value;
-    store('doughnut-name', t.value.trim());
-  }
+  if (t.id === 'name') setName(t.value);
   if (t.id === 'code') st.joinCode = t.value.toUpperCase();
 });
 

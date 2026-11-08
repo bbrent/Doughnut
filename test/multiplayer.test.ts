@@ -7,8 +7,8 @@ import { Table, TableError } from '../src/game/table';
 import { FakeClock } from './fake-clock';
 
 const makeBot = () => heuristicAgent();
-const alice = { id: 'a', name: 'Alice' };
-const bob = { id: 'b', name: 'Bob' };
+const alice = { id: 'a', name: 'Alice', accountId: null };
+const bob = { id: 'b', name: 'Bob', accountId: null };
 
 function table(clock: FakeClock, seats = 3) {
   return new Table('ABCDE', alice, { mode: 'doughnut', seats, botLevel: 'easy' }, { makeBot, clock, rng: mulberry32(1) });
@@ -105,9 +105,9 @@ describe('table', () => {
     const clock = new FakeClock();
     const t = table(clock, 2);
     t.join(bob);
-    expect(() => t.join({ id: 'c', name: 'C' })).toThrow('full');
+    expect(() => t.join({ id: 'c', name: 'C', accountId: null })).toThrow('full');
     t.start('a');
-    expect(() => t.join({ id: 'd', name: 'D' })).toThrow('started');
+    expect(() => t.join({ id: 'd', name: 'D', accountId: null })).toThrow('started');
   });
 });
 
