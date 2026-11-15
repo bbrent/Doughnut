@@ -28,15 +28,20 @@ Agents only receive an `Observation` (their own hand + public info), never the f
 
 ## Play online / deploy
 
-`npm run build` produces everything the host needs:
+**Step-by-step hosting instructions (cPanel or your own server) are in [DEPLOY.md](DEPLOY.md).**
 
-```
-dist/server.cjs      the whole server in one file (ws included, no native modules)
-dist/public/         the web client (index.html, app.js, styles.css, models/doughnut.json)
-models/doughnut.json the bots' model (read by the server)
-```
+`npm run package` builds `release/doughnut-<version>.zip`: a self-contained Node app (`app.js` start file; the server, MySQL driver, email and WebSockets in one bundle; the web client and the model) with **nothing to `npm install` on the host**. Settings come from environment variables or a `.env` file next to `app.js` (template: `deploy/.env.example`).
 
-Run with `node dist/server.cjs` (or `npm start`) from the project folder. Settings come from environment variables:
+The server also:
+- shuts down cleanly on SIGTERM
+- sends security headers (CSP, nosniff, no framing)
+- refuses anything but GET/HEAD
+- limits each connection to bursts of 40 messages, then 10 per second
+- links `app.js` and `styles.css` with a content hash, so browsers pick up a new version as soon as it's deployed
+
+`/health` reports the version, e.g. `0.1.0+<commit>`.
+
+For local development, `npm run build` then `npm start` runs `dist/server.cjs` from the project folder. Settings:
 
 | Variable | Default | |
 |---|---|---|

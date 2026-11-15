@@ -1,7 +1,16 @@
 // Build the web client and a self-contained server bundle into dist/.
 //   node scripts/build.mjs
+import { execSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { build } from 'esbuild';
-import { cpSync, mkdirSync, rmSync } from 'node:fs';
+
+const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+let commit = '';
+try {
+  commit = execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+} catch {}
+const version = commit ? `${pkg.version}+${commit}` : pkg.version;
 
 rmSync('dist', { recursive: true, force: true });
 mkdirSync('dist/public/models', { recursive: true });
@@ -15,9 +24,20 @@ await build({
   sourcemap: true,
   outfile: 'dist/public/app.js',
 });
-cpSync('src/client/index.html', 'dist/public/index.html');
 cpSync('src/client/styles.css', 'dist/public/styles.css');
 cpSync('models/doughnut.json', 'dist/public/models/doughnut.json');
+
+// Link the assets with a content hash so browsers fetch the new version after each deploy.
+const hash = createHash('sha256')
+  .update(readFileSync('dist/public/app.js'))
+  .update(readFileSync('dist/public/styles.css'))
+  .digest('hex')
+  .slice(0, 10);
+const html = readFileSync('src/client/index.html', 'utf8')
+  .replace('href="styles.css"', `href="styles.css?v=${hash}"`)
+  .replace('src="app.js"', `src="app.js?v=${hash}"`);
+if (!html.includes(`?v=${hash}`)) throw new Error('index.html asset links not found');
+writeFileSync('dist/public/index.html', html);
 
 await build({
   entryPoints: ['src/server/main.ts'],
@@ -26,7 +46,8 @@ await build({
   format: 'cjs',
   target: 'node18',
   outfile: 'dist/server.cjs',
+  define: { __VERSION__: JSON.stringify(version) },
   // ws optionally uses these native add-ons; it works without them.
   external: ['bufferutil', 'utf-8-validate'],
 });
-console.log('Built dist/public (client) and dist/server.cjs (server)');
+console.log(`Built Doughnut ${version}: dist/public (client) and dist/server.cjs (server)`);

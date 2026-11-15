@@ -16,6 +16,32 @@ import { AccountService } from './accounts';
 import { LogMailer } from './mailer';
 import { MemoryRepo } from './store';
 
+/** Sent with every page and file. The client uses inline style attributes, hence 'unsafe-inline' for styles only. */
+const SECURITY_HEADERS: Record<string, string> = {
+  'content-security-policy':
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+  'x-frame-options': 'DENY',
+};
+
+/** Per-connection message limit: bursts of 40, then 10 per second. */
+class MessageBucket {
+  private tokens = 40;
+  private last = Date.now();
+  take(): boolean {
+    const now = Date.now();
+    this.tokens = Math.min(40, this.tokens + ((now - this.last) / 1000) * 10);
+    this.last = now;
+    if (this.tokens < 1) return false;
+    this.tokens--;
+    return true;
+  }
+}
+
+declare const __VERSION__: string;
+const VERSION = typeof __VERSION__ !== 'undefined' ? __VERSION__ : 'dev';
+
 const TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -27,7 +53,8 @@ const TYPES: Record<string, string> = {
 };
 
 export interface ServerOptions {
-  port: number;
+  /** A port number, or a socket path (some hosts pass one in PORT). */
+  port: number | string;
   /** Directory with index.html, app.js, styles. */
   publicDir: string;
   /** Path to the trained model (optional; bots fall back to the heuristic). */
@@ -55,10 +82,15 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
   const root = resolve(opts.publicDir);
 
   const server = createServer((req, res) => {
+    for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405, { allow: 'GET, HEAD' }).end();
+      return;
+    }
     const url = new URL(req.url ?? '/', 'http://x');
     if (url.pathname === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, tables: lobby.tableCount, model: net !== null, store: store.repo.constructor.name }));
+      res.end(JSON.stringify({ ok: true, version: VERSION, tables: lobby.tableCount, model: net !== null, store: store.repo.constructor.name }));
       return;
     }
     if (url.pathname === '/api/leaderboard') {
@@ -85,9 +117,11 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
       res.writeHead(404).end('Client not built. Run npm run build.');
       return;
     }
+    // index.html is never cached; app.js and styles.css are linked with ?v=<build hash>, so they can be.
+    const versioned = url.searchParams.has('v');
     res.writeHead(200, {
       'content-type': TYPES[extname(file)] ?? 'application/octet-stream',
-      'cache-control': extname(file) === '.html' ? 'no-cache' : 'public, max-age=300',
+      'cache-control': extname(file) === '.html' ? 'no-cache' : versioned ? 'public, max-age=31536000, immutable' : 'public, max-age=300',
     });
     createReadStream(file).pipe(res);
   });
@@ -96,6 +130,8 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
   wss.on('connection', (ws: WebSocket) => {
     let token: string | null = null;
     let alive = true;
+    const bucket = new MessageBucket();
+    let dropped = 0;
     // Messages from one connection are handled strictly in order.
     let chain: Promise<unknown> = Promise.resolve();
     const client = {
@@ -110,6 +146,12 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
       ws.ping();
     }, 20_000);
     ws.on('message', (data) => {
+      if (!bucket.take()) {
+        if (++dropped > 200) ws.close(1008, 'Too many messages');
+        else if (dropped === 1) client.send({ t: 'error', message: 'Slow down a little' });
+        return;
+      }
+      dropped = 0;
       let msg: ClientMessage;
       try {
         msg = JSON.parse(String(data));

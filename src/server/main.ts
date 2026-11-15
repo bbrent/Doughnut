@@ -1,5 +1,8 @@
 /**
- * Entry point: node dist/server.cjs
+ * Entry point: node dist/server.cjs (or app.js in a release package)
+ *
+ * Settings come from environment variables, or a .env file next to app.js
+ * (variables already set win). See DEPLOY.md.
  *
  * Environment:
  *   PORT, APP_ROOT, PUBLIC_DIR, MODEL_PATH
@@ -9,6 +12,7 @@
  * Without a database nothing is saved across restarts; without SMTP, emails are printed to the log.
  */
 import { resolve } from 'node:path';
+import { loadDotEnv } from './env';
 import { AccountService } from './accounts';
 import { mailerFromEnv } from './mailer';
 import { startServer } from './server';
@@ -28,10 +32,18 @@ function repoFromEnv(env: NodeJS.ProcessEnv): Repo {
   return new MemoryRepo();
 }
 
+/** The app folder: the parent of dist/ when bundled, else the working directory. */
+function appRoot(): string {
+  if (process.env.APP_ROOT) return process.env.APP_ROOT;
+  return typeof __dirname !== 'undefined' && __dirname.endsWith('dist') ? resolve(__dirname, '..') : process.cwd();
+}
+
 async function main() {
+  const base = appRoot();
+  const fromFile = loadDotEnv(resolve(base, '.env'));
+  if (fromFile.length) console.log(`Loaded ${fromFile.length} setting(s) from .env`);
   const env = process.env;
   const port = Number(env.PORT ?? 3000);
-  const base = env.APP_ROOT ?? process.cwd();
   const publicUrl = env.PUBLIC_URL ?? `http://localhost:${port}`;
   if (!env.PUBLIC_URL) console.warn(`PUBLIC_URL not set: email links will point to ${publicUrl}`);
   const mailer = mailerFromEnv(env);
@@ -46,13 +58,35 @@ async function main() {
     repo = new MemoryRepo();
   }
 
-  const { server } = startServer({
-    port,
+  const { server, close } = startServer({
+    port: env.PORT && !/^\d+$/.test(env.PORT) ? env.PORT : port, // some hosts pass a socket path
     publicDir: env.PUBLIC_DIR ?? resolve(base, 'dist/public'),
     modelPath: env.MODEL_PATH ?? resolve(base, 'models/doughnut.json'),
     store: new AccountService(repo, mailer, { publicUrl }),
   });
-  server.on('listening', () => console.log(`Doughnut server on port ${port}`));
+  server.on('listening', () => console.log(`Doughnut ${VERSION} listening on ${env.PORT ?? port}`));
+  server.on('error', (e) => {
+    console.error('Server error:', e.message);
+    process.exit(1);
+  });
+
+  // Hosts stop or restart apps with SIGTERM: close connections and the database cleanly.
+  let stopping = false;
+  const stop = async (signal: string) => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`${signal}: shutting down`);
+    const force = setTimeout(() => process.exit(0), 5000);
+    force.unref();
+    await close().catch(() => {});
+    await repo.close().catch(() => {});
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => void stop('SIGTERM'));
+  process.on('SIGINT', () => void stop('SIGINT'));
 }
+
+declare const __VERSION__: string;
+const VERSION = typeof __VERSION__ !== 'undefined' ? __VERSION__ : 'dev';
 
 main();

@@ -13,7 +13,8 @@
     "distill": "tsx src/cli/distill.ts",
     "build": "node scripts/build.mjs",
     "start": "node dist/server.cjs",
-    "serve": "npm run build && npm start"
+    "serve": "npm run build && npm start",
+    "package": "node scripts/package.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
@@ -29,5 +30,8 @@
     "nodemailer": "~10.2.1",
     "openskill": "^4.1.1",
     "ws": "^8.22.1"
+  },
+  "engines": {
+    "node": ">=18.17"
   }
 }

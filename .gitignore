@@ -1,5 +1,7 @@
-node_modules/
-dist/
 *.log
+.env
 data/
+dist/
 models/*.latest.json
+node_modules/
+release/
