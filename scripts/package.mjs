@@ -19,7 +19,9 @@ const out = 'release/doughnut';
 rmSync('release', { recursive: true, force: true });
 
 // ---- public_html: the static pages, for your web server's public folder ----------
+// Only with --server-url: without it, the Node app serves the pages itself.
 const pub = `${out}/public_html`;
+if (serverUrl) {
 cpSync('dist/public', pub, { recursive: true });
 rmSync(`${pub}/app.js.map`, { force: true });
 const html = readFileSync(`${pub}/index.html`, 'utf8').replace(
@@ -51,6 +53,7 @@ writeFileSync(
 DirectoryIndex index.html
 `,
 );
+}
 
 // ---- app: the Node app (game server) -------------------------------------------------
 const app = `${out}/app`;
@@ -87,5 +90,5 @@ if (existsSync('/usr/bin/zip') || existsSync('/bin/zip')) {
   execSync(`tar -czf ${archive} -C release doughnut`);
 }
 console.log(`\nRelease ready: ${archive}`);
-console.log(`  public_html/  pages for your web server's public folder${serverUrl ? ` (game server: ${serverUrl})` : ' (no game server address set: only for Node serving everything)'}`);
-console.log('  app/          the Node app');
+if (serverUrl) console.log(`  public_html/  pages for your web server's public folder (game server: ${serverUrl})`);
+console.log(serverUrl ? '  app/          the Node app (game server)' : '  app/          the Node app: serves the pages and runs the game. Upload just this folder.');

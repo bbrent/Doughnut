@@ -12,8 +12,8 @@ Doughnut is a Node.js app that runs the game over WebSockets and stores accounts
 
 ## Two ways to host it
 
-- **A. Pages in your public folder, game in Node (recommended for shared hosting).** Your web server (Apache/cPanel) serves the game's pages from `public_html`, like any website, and the Node app only runs the game. The page connects to the Node app at an address you choose, e.g. `https://yourdomain.com/doughnut-server`.
-- **B. Node serves everything.** Point a domain or subdomain straight at the Node app.
+- **B. Node serves everything (simplest).** Upload one folder; the Node app serves the pages and runs the game at one address. There's no server address to set and no `.htaccess`. Use your domain, or a subdomain such as `play.yourdomain.com` if the domain already has a website. See 2a′.
+- **A. Pages in your public folder, game in Node.** Your web server (Apache/cPanel) serves the game's pages from `public_html`, like any website, and the Node app only runs the game. The page connects to the Node app at an address you choose, e.g. `https://yourdomain.com/doughnut-server`.
 
 ## 1. Make the release
 
@@ -21,14 +21,14 @@ On your computer, in the project folder:
 
 ```sh
 npm ci
-npm run package -- --server-url=https://yourdomain.com/doughnut-server   # setup A
-npm run package                                                          # setup B
+npm run package                                                          # setup B: just app/
+npm run package -- --server-url=https://yourdomain.com/doughnut-server   # setup A: public_html/ + app/
 ```
 
 This creates `release/doughnut-<version>.zip`, which contains:
 
 ```
-public_html/      the game's pages (setup A): upload to your public folder
+public_html/      only with --server-url (setup A): the game's pages, for your public folder
   index.html        contains the game server address (<meta name="doughnut-server">)
   app.js, styles.css, models/
   .htaccess         security and caching headers for Apache
@@ -79,12 +79,14 @@ If the game server's address changes later, edit the `content="…"` of `<meta n
 
 **Game server on a different address** (another subdomain such as `game.yourdomain.com`, or a different port): that works too. Package with that address. The site in `PUBLIC_URL` is always allowed to connect; list any other sites that host the pages in `ALLOWED_ORIGINS`, comma-separated. Pages from any other website are refused, which stops other sites from connecting players to your game server.
 
-## 2a′. cPanel, setup B (Node serves everything)
+## 2a′. cPanel, setup B (Node serves everything; simplest)
 
-As above, but:
-- skip copying `public_html`
-- set the Node app's **Application URL** to the domain or subdomain players open
-- package without `--server-url`
+Package with plain `npm run package`, then follow 2a with these differences:
+- **Step 3:** upload and extract the zip, but there's nothing to copy into `public_html`.
+- **Step 4:** set **Application root** to `doughnut/app`, and **Application URL** to the domain or subdomain players open (e.g. `play.yourdomain.com`, which you can create first under *Domains*).
+- **Step 5:** set `PUBLIC_URL` to that same address, e.g. `https://play.yourdomain.com`.
+
+To check, open `https://play.yourdomain.com/health`, then `https://play.yourdomain.com/`.
 
 ## 2b. Your own server (VPS)
 
