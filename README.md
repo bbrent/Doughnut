@@ -30,7 +30,13 @@ Agents only receive an `Observation` (their own hand + public info), never the f
 
 **Step-by-step hosting instructions (cPanel or your own server) are in [DEPLOY.md](DEPLOY.md).**
 
-`npm run package` builds `release/doughnut-<version>.zip`: a self-contained Node app (`app.js` start file; the server, MySQL driver, email and WebSockets in one bundle; the web client and the model) with **nothing to `npm install` on the host**. Settings come from environment variables or a `.env` file next to `app.js` (template: `deploy/.env.example`).
+`npm run package -- --server-url=https://yourdomain.com/doughnut-server` builds `release/doughnut-<version>.zip` with:
+- `public_html/`: the static pages, for your web server's public folder, set to connect to that game server address (`<meta name="doughnut-server">` in `index.html`, editable later), plus an `.htaccess` with security and caching headers
+- `app/`: the Node game server
+
+Package without `--server-url` to have the Node app serve the pages too. The server matches its routes (`/ws`, `/api/leaderboard`, `/health`) under any path prefix. It only accepts connections and cross-site requests from its own pages, the site in `PUBLIC_URL`, and `ALLOWED_ORIGINS`.
+
+The `app/` folder is a self-contained Node app (`app.js` start file; the server, MySQL driver, email and WebSockets in one bundle; the web client and the model) with **nothing to `npm install` on the host**. Settings come from environment variables or a `.env` file next to `app.js` (template: `deploy/.env.example`).
 
 The server also:
 - shuts down cleanly on SIGTERM

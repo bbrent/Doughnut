@@ -6,7 +6,9 @@
  *
  * Environment:
  *   PORT, APP_ROOT, PUBLIC_DIR, MODEL_PATH
- *   PUBLIC_URL     the site's address, used in email links (https://doughnut.example.com)
+ *   PUBLIC_URL     the address players open (where index.html is), used in email links;
+ *                  that site may connect even when this server is on another address
+ *   ALLOWED_ORIGINS  more websites allowed to connect, comma-separated
  *   DATABASE_URL   mysql://user:pass@host:3306/db  (or MYSQL_HOST / MYSQL_PORT / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DATABASE)
  *   SMTP_HOST, SMTP_PORT (587), SMTP_SECURE, SMTP_USER, SMTP_PASS, MAIL_FROM
  * Without a database nothing is saved across restarts; without SMTP, emails are printed to the log.
@@ -63,6 +65,8 @@ async function main() {
     publicDir: env.PUBLIC_DIR ?? resolve(base, 'dist/public'),
     modelPath: env.MODEL_PATH ?? resolve(base, 'models/doughnut.json'),
     store: new AccountService(repo, mailer, { publicUrl }),
+    // The site in PUBLIC_URL may always connect, plus any listed in ALLOWED_ORIGINS.
+    allowedOrigins: [publicUrl, ...(env.ALLOWED_ORIGINS ?? '').split(',').map((x) => x.trim()).filter(Boolean)],
   });
   server.on('listening', () => console.log(`Doughnut ${VERSION} listening on ${env.PORT ?? port}`));
   server.on('error', (e) => {

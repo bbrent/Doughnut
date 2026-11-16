@@ -93,3 +93,44 @@ describe('server', () => {
     b.ws.close();
   }, 30_000);
 });
+
+describe('pages served elsewhere (static web server + Node game server)', () => {
+  let srv2: ReturnType<typeof startServer>;
+  let port2 = 0;
+  beforeAll(async () => {
+    srv2 = startServer({ port: 0, publicDir: mkdtempSync(join(tmpdir(), 'none-')), allowedOrigins: ['https://site.test/play/'] });
+    await new Promise<void>((r) => srv2.server.once('listening', () => r()));
+    port2 = (srv2.server.address() as { port: number }).port;
+  });
+  afterAll(() => srv2.close());
+
+  const tryWs = (path: string, origin?: string) =>
+    new Promise<string>((resolve) => {
+      const ws = new WebSocket(`ws://localhost:${port2}${path}`, origin ? { origin } : {});
+      ws.on('open', () => {
+        ws.close();
+        resolve('open');
+      });
+      ws.on('error', () => resolve('refused'));
+      ws.on('unexpected-response', (_req, res) => resolve(`refused ${res.statusCode}`));
+    });
+
+  it('accepts game connections from the allowed site, under any path prefix, and refuses others', async () => {
+    expect(await tryWs('/ws', 'https://site.test')).toBe('open');
+    expect(await tryWs('/doughnut-server/ws', 'https://site.test')).toBe('open');
+    expect(await tryWs('/ws')).toBe('open'); // no Origin: not a browser page
+    expect(await tryWs('/ws', `http://localhost:${port2}`)).toBe('open'); // pages served by this server
+    expect(await tryWs('/ws', 'https://evil.test')).toMatch(/refused/);
+    expect(await tryWs('/nope', 'https://site.test')).toMatch(/refused/);
+  });
+
+  it('lets the allowed site read the leaderboard and health (CORS), not others', async () => {
+    const get = (path: string, origin: string) => fetch(`http://localhost:${port2}${path}`, { headers: { origin } });
+    const ok = await get('/doughnut-server/api/leaderboard', 'https://site.test');
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get('access-control-allow-origin')).toBe('https://site.test');
+    const bad = await get('/api/leaderboard', 'https://evil.test');
+    expect(bad.headers.get('access-control-allow-origin')).toBeNull();
+    expect((await get('/doughnut-server/health', 'https://site.test')).headers.get('access-control-allow-origin')).toBe('https://site.test');
+  });
+});

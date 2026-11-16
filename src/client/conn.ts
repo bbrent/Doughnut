@@ -4,6 +4,7 @@ import { Lobby, type Client } from '../game/lobby';
 import type { ClientMessage, ServerMessage } from '../game/protocol';
 import { loadModel } from '../ml/dmc';
 import type { Mlp } from '../ml/mlp';
+import { serverWs } from './server-url';
 
 export interface Conn {
   send(msg: ClientMessage): void;
@@ -22,7 +23,7 @@ export function onlineConn(
   let closed = false;
   let retry = 500;
   const pending: ClientMessage[] = [];
-  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+  const url = serverWs();
 
   const open = () => {
     onStatus('connecting');

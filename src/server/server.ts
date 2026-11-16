@@ -63,6 +63,21 @@ export interface ServerOptions {
   table?: Omit<TableDeps, 'onChange' | 'onGameOver' | 'makeBot'>;
   /** Accounts, games and ratings. Must already be initialised. Defaults to in-memory, emails logged. */
   store?: AccountService;
+  /**
+   * Websites allowed to connect when the pages are served from somewhere else
+   * (e.g. https://example.com when the Node app is on another subdomain or port).
+   * Pages served by this server itself are always allowed.
+   */
+  allowedOrigins?: string[];
+}
+
+/** Origin "https://example.com" from any URL, or null. */
+export function originOf(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
 }
 
 export function loadNet(path?: string): Mlp | null {
@@ -80,20 +95,38 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
   const store = opts.store ?? new AccountService(new MemoryRepo(), new LogMailer(), { publicUrl: `http://localhost:${opts.port}` });
   const lobby = new Lobby({ ...opts.table, makeBot: botFactory(net) }, opts.lobby, store);
   const root = resolve(opts.publicDir);
+  const allowed = new Set((opts.allowedOrigins ?? []).map((o) => originOf(o)).filter((o): o is string => !!o));
+  /** Same host as the request (pages served by this server), or an allowed website. */
+  const originOk = (origin: string | undefined, host: string | undefined) => {
+    if (!origin) return true; // not a browser page (curl, health checks)
+    const o = originOf(origin);
+    return !!o && (allowed.has(o) || new URL(o).host === host);
+  };
 
   const server = createServer((req, res) => {
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
+    const origin = req.headers.origin;
+    if (origin && originOk(origin, req.headers.host)) {
+      res.setHeader('access-control-allow-origin', origin);
+      res.setHeader('vary', 'Origin');
+    }
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, { 'access-control-allow-methods': 'GET, HEAD', 'access-control-max-age': '86400' }).end();
+      return;
+    }
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.writeHead(405, { allow: 'GET, HEAD' }).end();
       return;
     }
     const url = new URL(req.url ?? '/', 'http://x');
-    if (url.pathname === '/health') {
+    // Match by ending, so it works whether or not the host passes a path prefix
+    // (e.g. a cPanel app mounted at /doughnut-server).
+    if (url.pathname.endsWith('/health')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true, version: VERSION, tables: lobby.tableCount, model: net !== null, store: store.repo.constructor.name }));
       return;
     }
-    if (url.pathname === '/api/leaderboard') {
+    if (url.pathname.endsWith('/api/leaderboard')) {
       store
         .leaderboard(Number(url.searchParams.get('limit') ?? 20))
         .then((rows) => {
@@ -126,7 +159,17 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
     createReadStream(file).pipe(res);
   });
 
-  const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 16 * 1024 });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
+  server.on('upgrade', (req, socket, head) => {
+    const path = new URL(req.url ?? '/', 'http://x').pathname;
+    if (!path.endsWith('/ws')) return socket.destroy();
+    // Only pages from this server or an allowed website may open a game connection.
+    if (!originOk(req.headers.origin, req.headers.host)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      return socket.destroy();
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  });
   wss.on('connection', (ws: WebSocket) => {
     let token: string | null = null;
     let alive = true;

@@ -4,6 +4,7 @@ import type { AccountView, BotLevel, ClientMessage, FriendView, FriendsView, Inv
 import { localConn, onlineConn, type Conn, type Status } from './conn';
 import { BOT_LEVELS, BOT_LEVEL_IDS } from '../game/bots';
 import { robotHtml } from './icons';
+import { serverHttp } from './server-url';
 import { chooseLayout, tableSvg } from './table-svg';
 
 // ---- persistent per-browser settings ---------------------------------------
@@ -59,7 +60,7 @@ const st = {
 };
 
 function loadLeaders() {
-  fetch('api/leaderboard?limit=10')
+  fetch(serverHttp('api/leaderboard?limit=10'))
     .then((r) => (r.ok ? r.json() : null))
     .then((rows) => {
       st.leaders = rows;
