@@ -151,14 +151,21 @@ Games in progress end when the app restarts, so update when it's quiet.
 | `MYSQL_HOST` `MYSQL_PORT` `MYSQL_USER` `MYSQL_PASSWORD` `MYSQL_DATABASE` | none | Instead of `DATABASE_URL` |
 | `SMTP_HOST` `SMTP_PORT` `SMTP_USER` `SMTP_PASS` `MAIL_FROM` | none | Outgoing email. Without them, emails go to the app log |
 | `SMTP_SECURE` | true on port 465 | Set `true` for TLS from the start, `false` for STARTTLS |
+| `BASE_PATH` | none (Passenger's `PASSENGER_BASE_URI` if set) | Only if the app is at a path such as `yourdomain.com/doughnut` **and** the page loads without its styling or script: set `BASE_PATH=/doughnut` |
 | `APP_ROOT`, `PUBLIC_DIR`, `MODEL_PATH` | the app folder | Only if you move things around |
 
 Settings in the environment take priority over `.env`.
 
 ## Troubleshooting
 
+First, open `/health` on the app's address. It shows the app version, the Node.js version (`node`), whether the pages were found (`pages`), and the database (`store`). Also look at the app's log; in cPanel, `stderr.log` in the app folder, or the log link in *Setup Node.js App*.
+
 | Symptom | Likely cause |
 |---|---|
+| A page saying the app "could not be started", or a log line "Doughnut needs Node.js 18.17 or newer" | The app is set to an old Node.js. In *Setup Node.js App*, choose 20 or newer, then restart |
+| Plain, unstyled page, or "Still here? The game's script didn't load" | The app is at a path (e.g. `/doughnut`) and the host removes it before it reaches Node. Set `BASE_PATH=/doughnut` and restart. If `/health` shows `"pages":false`, the `dist/public` folder wasn't uploaded |
+| A red "Something went wrong" box | An error in the game itself. Please send the text in the box |
+| "Can't reach the game server" banner | The page can't open the game connection: see the next row |
 | Page loads but says "reconnecting…" | Check, in order: the server address in `index.html` (`<meta name="doughnut-server">`) matches the Node app's URL; `PUBLIC_URL` is the address of the page; WebSockets aren't blocked by the host or proxy (for nginx, the `Upgrade` lines) |
 | Leaderboard never appears | Same causes as "reconnecting…" |
 | `/health` shows `MemoryRepo` | Wrong database settings, or the user lacks rights. The log shows the MySQL error |

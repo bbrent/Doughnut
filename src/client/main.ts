@@ -4,8 +4,20 @@ import type { AccountView, BotLevel, ClientMessage, FriendView, FriendsView, Inv
 import { localConn, onlineConn, type Conn, type Status } from './conn';
 import { BOT_LEVELS, BOT_LEVEL_IDS } from '../game/bots';
 import { robotHtml } from './icons';
-import { serverHttp } from './server-url';
+import { serverHttp, serverWs } from './server-url';
 import { chooseLayout, tableSvg } from './table-svg';
+
+// ---- errors ------------------------------------------------------------------------
+// Show unexpected errors on the page (not just the console), so players can report them.
+function showFatal(what: string) {
+  const el = document.getElementById('fatal');
+  if (!el || !el.hidden) return;
+  el.hidden = false;
+  el.innerHTML = `<strong>Something went wrong.</strong> Reloading the page usually helps. If it keeps happening, please report this:<br><code></code>`;
+  el.querySelector('code')!.textContent = what;
+}
+window.addEventListener('error', (e) => showFatal(`${e.message} (${(e.filename || '').split('/').pop()}:${e.lineno})`));
+window.addEventListener('unhandledrejection', (e) => showFatal(String((e.reason as Error)?.stack ?? e.reason)));
 
 // ---- persistent per-browser settings ---------------------------------------
 
@@ -544,7 +556,7 @@ function tableHtml(t: TableView): string {
   const conn = st.practice ? 'practice' : st.status;
   const header = `<div class="bar">
       <div><strong>${esc(mode.name)}</strong> <span class="muted small">${st.practice ? 'practice' : `table ${t.code}`}${o ? ` · hand ${o.handsPlayed + (o.phase === 'handOver' || o.phase === 'gameOver' ? 0 : 1)}` : ''}${t.seats.some((x) => x.kind === 'bot') || t.status === 'lobby' ? ` · ${BOT_LEVELS[t.settings.botLevel].label.toLowerCase()} bots` : ''}</span></div>
-      <div><span class="conn ${conn === 'offline' ? 'offline' : ''}">${conn === 'offline' ? 'reconnecting…' : conn}</span>
+      <div><span class="conn ${conn === 'offline' || conn === 'unreachable' ? 'offline' : ''}">${conn === 'offline' || conn === 'unreachable' ? 'reconnecting…' : conn}</span>
         ${st.account && !st.practice ? `<button data-action="invite-toggle" aria-expanded="${st.invitePanel}">Invite friends</button>` : ''}
         <button data-action="leave">Leave</button></div>
     </div>${st.invitePanel && st.account && !st.practice ? invitePanelHtml(t) : ''}`;
@@ -586,7 +598,14 @@ function tableHtml(t: TableView): string {
 
 function render() {
   const focused = document.activeElement?.id;
+  const unreachable =
+    st.status === 'unreachable' && !st.practice
+      ? `<div class="invite" role="alert" style="border-color:var(--bad)"><div><strong>Can't reach the game server.</strong>
+          Online play, sign-in and the leaderboard need it; practice still works. Still trying…
+          <div class="small muted">Tried <code>${esc(serverWs())}</code>. If you run this site, check <code>${esc(serverHttp('health'))}</code> and "Troubleshooting" in DEPLOY.md.</div></div></div>`
+      : '';
   app.innerHTML =
+    unreachable +
     invitesHtml() + (st.screen === 'home' ? homeHtml() : st.screen === 'queue' ? queueHtml() : st.table ? tableHtml(st.table) : homeHtml());
   if (focused) (document.getElementById(focused) as HTMLInputElement | null)?.focus();
   tickCountdown();

@@ -1,11 +1,13 @@
 /**
  * Where the game server (the Node app) is. Set in index.html:
  *   <meta name="doughnut-server" content="https://example.com/doughnut-server">
- * Empty means "the server that sent this page", relative to the page's folder.
+ * Empty means "the server that sent this page", relative to the page's folder
+ * (its <base href>).
  */
 function base(): URL {
   const meta = document.querySelector('meta[name="doughnut-server"]')?.getAttribute('content')?.trim();
-  const u = new URL(meta || '.', location.href);
+  // document.baseURI honours the <base href> the server adds for path prefixes.
+  const u = new URL(meta || '.', document.baseURI);
   if (!u.pathname.endsWith('/')) u.pathname += '/';
   return u;
 }

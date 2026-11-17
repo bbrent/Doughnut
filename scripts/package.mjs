@@ -38,7 +38,7 @@ writeFileSync(
   Header always set X-Content-Type-Options "nosniff"
   Header always set Referrer-Policy "no-referrer"
   Header always set X-Frame-Options "DENY"
-  Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ${connect}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+  Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ${connect}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
   # index.html must never be cached; it links app.js and styles.css with ?v=<hash>, so those can be.
   <FilesMatch "\\.html$">
     Header set Cache-Control "no-cache"
@@ -62,7 +62,20 @@ mkdirSync(`${app}/models`, { recursive: true });
 cpSync('dist', `${app}/dist`, { recursive: true });
 cpSync('models/doughnut.json', `${app}/models/doughnut.json`);
 cpSync('deploy/.env.example', `${app}/.env.example`);
-writeFileSync(`${app}/app.js`, "// Doughnut game server. Settings: environment variables or .env (see DEPLOY.md).\nrequire('./dist/server.cjs');\n");
+// Kept to old-style JavaScript so even an outdated Node can show the message.
+writeFileSync(
+  `${app}/app.js`,
+  `// Doughnut game server. Settings: environment variables or .env (see DEPLOY.md).
+var v = process.versions.node.split('.').map(Number);
+if (v[0] < 18 || (v[0] === 18 && v[1] < 17)) {
+  var msg = 'Doughnut needs Node.js 18.17 or newer, but this is Node ' + process.version +
+    '. Choose Node.js 20 or newer for this app (cPanel: Setup Node.js App > Node.js version) and restart it.';
+  console.error(msg);
+  throw new Error(msg);
+}
+require('./dist/server.cjs');
+`,
+);
 writeFileSync(
   `${app}/package.json`,
   JSON.stringify(

@@ -11,7 +11,7 @@ export interface Conn {
   close(): void;
 }
 
-export type Status = 'connecting' | 'online' | 'offline';
+export type Status = 'connecting' | 'online' | 'offline' | 'unreachable';
 
 /** WebSocket connection that reconnects and re-introduces itself automatically. */
 export function onlineConn(
@@ -22,6 +22,7 @@ export function onlineConn(
   let ws: WebSocket | null = null;
   let closed = false;
   let retry = 500;
+  let failures = 0;
   const pending: ClientMessage[] = [];
   const url = serverWs();
 
@@ -30,6 +31,7 @@ export function onlineConn(
     ws = new WebSocket(url);
     ws.onopen = () => {
       retry = 500;
+      failures = 0;
       onStatus('online');
       ws!.send(JSON.stringify(hello()));
       while (pending.length) ws!.send(JSON.stringify(pending.shift()));
@@ -38,7 +40,9 @@ export function onlineConn(
     ws.onclose = () => {
       ws = null;
       if (closed) return;
-      onStatus('offline');
+      // Repeated failures without ever connecting usually mean a setup problem, not a blip.
+      if (++failures === 4) onStatus('unreachable');
+      else onStatus(failures > 4 ? 'unreachable' : 'offline');
       setTimeout(open, retry);
       retry = Math.min(retry * 2, 8000);
     };

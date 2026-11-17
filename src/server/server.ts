@@ -3,7 +3,7 @@
  * One process, no database, no native modules: suitable for basic Node hosting.
  */
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
-import { createServer, type Server } from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { botFactory } from '../game/bots';
@@ -19,7 +19,7 @@ import { MemoryRepo } from './store';
 /** Sent with every page and file. The client uses inline style attributes, hence 'unsafe-inline' for styles only. */
 const SECURITY_HEADERS: Record<string, string> = {
   'content-security-policy':
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
   'x-frame-options': 'DENY',
@@ -69,6 +69,11 @@ export interface ServerOptions {
    * Pages served by this server itself are always allowed.
    */
   allowedOrigins?: string[];
+  /**
+   * The path the app is published under, when the host removes it before
+   * requests reach Node (e.g. "/doughnut"). Usually not needed.
+   */
+  basePath?: string;
 }
 
 /** Origin "https://example.com" from any URL, or null. */
@@ -96,17 +101,45 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
   const lobby = new Lobby({ ...opts.table, makeBot: botFactory(net) }, opts.lobby, store);
   const root = resolve(opts.publicDir);
   const allowed = new Set((opts.allowedOrigins ?? []).map((o) => originOf(o)).filter((o): o is string => !!o));
-  /** Same host as the request (pages served by this server), or an allowed website. */
-  const originOk = (origin: string | undefined, host: string | undefined) => {
+  /**
+   * Pages served by this server (same host as the request, or as forwarded by a
+   * proxy in front of it), or an allowed website. Browsers can't set
+   * X-Forwarded-Host themselves, so this can't be faked from a web page.
+   */
+  const originOk = (origin: string | undefined, req: IncomingMessage) => {
     if (!origin) return true; // not a browser page (curl, health checks)
     const o = originOf(origin);
-    return !!o && (allowed.has(o) || new URL(o).host === host);
+    if (!o) return false;
+    if (allowed.has(o)) return true;
+    const host = new URL(o).host;
+    const forwarded = String(req.headers['x-forwarded-host'] ?? '').split(',').map((h) => h.trim());
+    return host === req.headers.host || forwarded.includes(host);
+  };
+
+  /**
+   * The page. It links its files relatively, so it gets a <base href> for the
+   * folder it's served from: the path the browser asked for, with the host's
+   * prefix added back if the host removed it (BASE_PATH or PASSENGER_BASE_URI).
+   */
+  const indexFile = join(root, 'index.html');
+  const sendIndex = (req: IncomingMessage, res: ServerResponse, pathname: string) => {
+    if (!existsSync(indexFile)) {
+      res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' }).end(`The game's pages are missing: ${indexFile} not found.`);
+      return;
+    }
+    const prefix = (opts.basePath ?? '').replace(/\/+$/, '');
+    let dir = pathname.endsWith('/') ? pathname : `${pathname}/`;
+    if (prefix && !dir.startsWith(`${prefix}/`)) dir = `${prefix}${dir}`;
+    dir = dir.replace(/\/{2,}/g, '/');
+    const html = readFileSync(indexFile, 'utf8').replace('<head>', `<head>\n  <base href="${dir.replace(/[&<>"']/g, '')}" />`);
+    res.writeHead(200, { 'content-type': TYPES['.html'], 'cache-control': 'no-cache' });
+    res.end(html);
   };
 
   const server = createServer((req, res) => {
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
     const origin = req.headers.origin;
-    if (origin && originOk(origin, req.headers.host)) {
+    if (origin && originOk(origin, req)) {
       res.setHeader('access-control-allow-origin', origin);
       res.setHeader('vary', 'Origin');
     }
@@ -123,7 +156,18 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
     // (e.g. a cPanel app mounted at /doughnut-server).
     if (url.pathname.endsWith('/health')) {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, version: VERSION, tables: lobby.tableCount, model: net !== null, store: store.repo.constructor.name }));
+      res.end(
+        JSON.stringify({
+          ok: true,
+          version: VERSION,
+          node: process.version,
+          pages: existsSync(indexFile),
+          basePath: opts.basePath ?? '',
+          tables: lobby.tableCount,
+          model: net !== null,
+          store: store.repo.constructor.name,
+        }),
+      );
       return;
     }
     if (url.pathname.endsWith('/api/leaderboard')) {
@@ -139,22 +183,45 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
         });
       return;
     }
-    // Static files; unknown paths fall back to index.html (invite links like /?t=CODE).
-    let file = normalize(join(root, decodeURIComponent(url.pathname)));
-    if (file !== root && !file.startsWith(root + sep)) {
-      res.writeHead(403).end();
+    // Static files. The app may live under a path prefix (e.g. a cPanel app at
+    // yourdomain.com/doughnut) that the host may or may not pass on, so look the
+    // file up with leading path segments dropped one at a time.
+    let pathname: string;
+    try {
+      pathname = decodeURIComponent(url.pathname);
+    } catch {
+      res.writeHead(400).end();
       return;
     }
-    if (!existsSync(file) || statSync(file).isDirectory()) file = join(root, 'index.html');
-    if (!existsSync(file)) {
-      res.writeHead(404).end('Client not built. Run npm run build.');
+    const segments = pathname.split('/').filter(Boolean);
+    let file: string | null = null;
+    for (let k = 0; k < segments.length && !file; k++) {
+      const candidate = normalize(join(root, ...segments.slice(k)));
+      if (candidate !== root && !candidate.startsWith(root + sep)) {
+        res.writeHead(403).end();
+        return;
+      }
+      if (existsSync(candidate) && statSync(candidate).isFile()) file = candidate;
+    }
+    if (!file) {
+      // A missing script, stylesheet or data file is a 404, never the page (which
+      // would make the browser fail with a confusing "MIME type" error).
+      if (extname(pathname)) {
+        res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end(`Not found: ${pathname}`);
+        return;
+      }
+      sendIndex(req, res, pathname);
       return;
     }
-    // index.html is never cached; app.js and styles.css are linked with ?v=<build hash>, so they can be.
+    if (extname(file) === '.html') {
+      sendIndex(req, res, pathname);
+      return;
+    }
+    // app.js and styles.css are linked with ?v=<build hash>, so they can be cached for good.
     const versioned = url.searchParams.has('v');
     res.writeHead(200, {
       'content-type': TYPES[extname(file)] ?? 'application/octet-stream',
-      'cache-control': extname(file) === '.html' ? 'no-cache' : versioned ? 'public, max-age=31536000, immutable' : 'public, max-age=300',
+      'cache-control': versioned ? 'public, max-age=31536000, immutable' : 'public, max-age=300',
     });
     createReadStream(file).pipe(res);
   });
@@ -164,7 +231,8 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
     const path = new URL(req.url ?? '/', 'http://x').pathname;
     if (!path.endsWith('/ws')) return socket.destroy();
     // Only pages from this server or an allowed website may open a game connection.
-    if (!originOk(req.headers.origin, req.headers.host)) {
+    if (!originOk(req.headers.origin, req)) {
+      console.warn(`Refused a game connection from ${req.headers.origin} (not this site, PUBLIC_URL or ALLOWED_ORIGINS)`);
       socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return socket.destroy();
     }

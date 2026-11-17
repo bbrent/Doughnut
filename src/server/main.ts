@@ -65,10 +65,14 @@ async function main() {
     publicDir: env.PUBLIC_DIR ?? resolve(base, 'dist/public'),
     modelPath: env.MODEL_PATH ?? resolve(base, 'models/doughnut.json'),
     store: new AccountService(repo, mailer, { publicUrl }),
+    // Path prefix the host removes before requests reach Node (cPanel/Passenger sets PASSENGER_BASE_URI).
+    basePath: env.BASE_PATH ?? env.PASSENGER_BASE_URI ?? '',
     // The site in PUBLIC_URL may always connect, plus any listed in ALLOWED_ORIGINS.
     allowedOrigins: [publicUrl, ...(env.ALLOWED_ORIGINS ?? '').split(',').map((x) => x.trim()).filter(Boolean)],
   });
-  server.on('listening', () => console.log(`Doughnut ${VERSION} listening on ${env.PORT ?? port}`));
+  server.on('listening', () =>
+    console.log(`Doughnut ${VERSION} on Node ${process.version}, listening on ${env.PORT ?? port}${env.BASE_PATH || env.PASSENGER_BASE_URI ? ` under ${env.BASE_PATH ?? env.PASSENGER_BASE_URI}` : ''}`),
+  );
   server.on('error', (e) => {
     console.error('Server error:', e.message);
     process.exit(1);

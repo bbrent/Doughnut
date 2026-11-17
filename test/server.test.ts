@@ -60,7 +60,7 @@ describe('server', () => {
         req.end();
       });
     });
-    expect([200, 403]).toContain(res);
+    expect([200, 403, 404]).toContain(res);
     const body = await new Promise<string>((resolve) => {
       import('node:http').then(({ request }) => {
         const req = request({ host: 'localhost', port, path: '/../../package.json' }, (r) => {
@@ -132,5 +132,45 @@ describe('pages served elsewhere (static web server + Node game server)', () => 
     const bad = await get('/api/leaderboard', 'https://evil.test');
     expect(bad.headers.get('access-control-allow-origin')).toBeNull();
     expect((await get('/doughnut-server/health', 'https://site.test')).headers.get('access-control-allow-origin')).toBe('https://site.test');
+  });
+});
+
+describe('serving the pages under a path prefix', () => {
+  let srv3: ReturnType<typeof startServer>;
+  let srv4: ReturnType<typeof startServer>;
+  let p3 = 0;
+  let p4 = 0;
+  beforeAll(async () => {
+    const pub = mkdtempSync(join(tmpdir(), 'pub-'));
+    writeFileSync(join(pub, 'index.html'), '<!doctype html><html><head><title>t</title></head><body><script type="module" src="app.js?v=1"></script></body></html>');
+    writeFileSync(join(pub, 'app.js'), 'console.log(1)');
+    srv3 = startServer({ port: 0, publicDir: pub }); // host passes the prefix through
+    srv4 = startServer({ port: 0, publicDir: pub, basePath: '/doughnut' }); // host strips it
+    await Promise.all([srv3, srv4].map((s) => new Promise<void>((r) => s.server.once('listening', () => r()))));
+    p3 = (srv3.server.address() as { port: number }).port;
+    p4 = (srv4.server.address() as { port: number }).port;
+  });
+  afterAll(() => Promise.all([srv3.close(), srv4.close()]));
+
+  it('finds files under any prefix and never answers a missing script with the page', async () => {
+    const js = await fetch(`http://localhost:${p3}/doughnut/app.js?v=1`);
+    expect(js.status).toBe(200);
+    expect(js.headers.get('content-type')).toMatch(/javascript/);
+    const missing = await fetch(`http://localhost:${p3}/doughnut/missing.js`);
+    expect(missing.status).toBe(404);
+    expect(missing.headers.get('content-type')).toMatch(/text\/plain/);
+  });
+
+  it('tells the page which folder it lives in (<base href>)', async () => {
+    const base = async (port: number, path: string) =>
+      /<base href="([^"]*)"/.exec(await (await fetch(`http://localhost:${port}${path}`)).text())?.[1];
+    expect(await base(p3, '/')).toBe('/');
+    expect(await base(p3, '/?t=ABCDE')).toBe('/');
+    expect(await base(p3, '/doughnut')).toBe('/doughnut/');
+    expect(await base(p3, '/doughnut/')).toBe('/doughnut/');
+    expect(await base(p4, '/')).toBe('/doughnut/'); // prefix removed by the host, added back
+    expect(await base(p4, '/doughnut/')).toBe('/doughnut/');
+    const h = await (await fetch(`http://localhost:${p4}/health`)).json();
+    expect(h).toMatchObject({ pages: true, basePath: '/doughnut', node: process.version });
   });
 });

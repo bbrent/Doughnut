@@ -11,7 +11,15 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='38' fill='none' stroke='%23d9822b' stroke-width='22'/></svg>" />
 </head>
 <body>
-  <div id="app"></div>
+  <div id="app">
+    <!-- Replaced as soon as the game starts. Stays only if app.js can't load. -->
+    <div class="boot">
+      <p>Loading Doughnut…</p>
+      <p class="boot-help">Still here? The game's script didn't load. Open this site's <code>/health</code> page,
+        and the browser's developer console (F12), and see "Troubleshooting" in DEPLOY.md.</p>
+    </div>
+  </div>
+  <div id="fatal" role="alert" hidden></div>
   <div id="toast" role="status" aria-live="polite"></div>
   <script type="module" src="app.js"></script>
 </body>
