@@ -328,6 +328,22 @@ describe('quick match: at least two people, voting to start, joining games in pr
     lobby.tick();
   }
 
+  it('cancelling a quick match confirms it and updates the others waiting; stats count people', async () => {
+    const { lobby } = setup();
+    const a = await player(lobby, 1, 'Ann');
+    const b = await player(lobby, 2, 'Ben');
+    await lobby.handle(a, tok(1), { t: 'quick', mode: 'doughnut', prefer: 'wait' });
+    await lobby.handle(b, tok(2), { t: 'quick', mode: 'doughnut', prefer: 'wait' });
+    expect(lobby.stats()).toEqual({ online: 2, playing: 0, games: 0, waiting: 2 });
+    await lobby.handle(b, tok(2), { t: 'leave' });
+    expect(b.last('left')).toBeTruthy();
+    expect(a.last('queued')!.queue.players.map((p) => p.name)).toEqual(['Ann']);
+    expect(a.last('queued')!.queue.botsAt).toBeNull();
+    expect(lobby.stats()).toEqual({ online: 2, playing: 0, games: 0, waiting: 1 });
+    lobby.disconnect(b, tok(2));
+    expect(lobby.stats().online).toBe(1);
+  });
+
   it('the countdown starts when a second person arrives; the game starts with bots when it ends', async () => {
     const { clock, lobby } = setup();
     const a = await player(lobby, 1, 'Ann');

@@ -144,6 +144,18 @@ export class Lobby {
     return this.tables.size;
   }
 
+  /** For the home page: people connected, games under way, people waiting for a quick match. */
+  stats(): { online: number; playing: number; games: number; waiting: number } {
+    const live = [...new Set(this.sessions.values())].filter((s) => s.clients.size > 0);
+    const games = [...this.tables.values()].filter((t) => t.status === 'playing');
+    return {
+      online: live.length,
+      playing: live.filter((s) => s.table?.status === 'playing').length,
+      games: games.length,
+      waiting: this.queue.length,
+    };
+  }
+
   /**
    * Handle one message from a client. `token` is null until hello. Callers
    * must await each message before passing the next one from the same client.
@@ -508,9 +520,17 @@ export class Lobby {
   }
 
   private leave(s: Session, quiet = false): void {
+    const wasQueued = this.queue.some((q) => q.session === s);
     this.queue = this.queue.filter((q) => q.session !== s);
     const t = s.table;
-    if (!t) return;
+    if (!t) {
+      if (wasQueued) {
+        if (!quiet) this.send(s, { t: 'left' });
+        this.sendQueueStatus(); // the others waiting see one fewer
+        this.presenceChanged(s.user.accountId);
+      }
+      return;
+    }
     s.table = null;
     this.members.get(t)?.delete(s);
     t.leave(s.user.id);

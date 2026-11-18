@@ -51,6 +51,8 @@ function connect() {
 
 describe('server', () => {
   it('serves health and static files, refusing path traversal', async () => {
+    const stats = await fetch(`http://localhost:${port}/api/stats`).then((r) => r.json());
+    expect(stats).toEqual({ online: 0, playing: 0, games: 0, waiting: 0 });
     const h = await fetch(`http://localhost:${port}/health`).then((r) => r.json());
     expect(h).toMatchObject({ ok: true, model: true });
     expect((await fetch(`http://localhost:${port}/anything`)).status).toBe(200);

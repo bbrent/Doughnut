@@ -170,6 +170,11 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
       );
       return;
     }
+    if (url.pathname.endsWith('/api/stats')) {
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' });
+      res.end(JSON.stringify(lobby.stats()));
+      return;
+    }
     if (url.pathname.endsWith('/api/leaderboard')) {
       store
         .leaderboard(Number(url.searchParams.get('limit') ?? 20))

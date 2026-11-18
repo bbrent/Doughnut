@@ -71,6 +71,31 @@ const st = {
   leaders: null as { name: string; rating: number; games: number; wins: number }[] | null,
 };
 
+/** People online, games in progress, people looking for a quick match. */
+let stats: { online: number; playing: number; games: number; waiting: number } | null = null;
+function loadStats() {
+  fetch(serverHttp('api/stats'))
+    .then((r) => (r.ok ? r.json() : null))
+    .then((x) => {
+      const changed = JSON.stringify(x) !== JSON.stringify(stats);
+      stats = x;
+      if (changed && st.screen === 'home') render();
+    })
+    .catch(() => {});
+}
+setInterval(() => {
+  if (st.screen === 'home' && document.visibilityState === 'visible') loadStats();
+}, 15_000);
+
+function statsHtml(): string {
+  if (!stats) return '';
+  const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`;
+  const parts = [n(stats.online, 'player online', 'players online')];
+  if (stats.games) parts.push(n(stats.games, 'game in progress', 'games in progress'));
+  if (stats.waiting) parts.push(n(stats.waiting, 'looking for a quick match', 'looking for a quick match'));
+  return `<div class="stats"><span class="live-dot ${stats.online ? 'on' : ''}"></span>${parts.join(' · ')}</div>`;
+}
+
 function loadLeaders() {
   fetch(serverHttp('api/leaderboard?limit=10'))
     .then((r) => (r.ok ? r.json() : null))
@@ -95,6 +120,7 @@ function onMessage(m: ServerMessage) {
   switch (m.t) {
     case 'welcome':
       if (st.practice) break;
+      loadStats(); // now counting you too
       st.account = m.account;
       st.helloName = m.name;
       if (m.account) setName(m.account.nickname);
@@ -168,6 +194,7 @@ function onMessage(m: ServerMessage) {
 }
 
 function backHome() {
+  loadStats();
   st.table = null;
   st.invitePanel = false;
   st.ratingChange = null;
@@ -389,6 +416,7 @@ function homeHtml(): string {
   return `
   <h1><span class="ring"></span>Doughnut</h1>
   <p class="sub">A trick-taking race to zero. Take tricks, dodge doughnuts.</p>
+  ${statsHtml()}
   ${identityHtml()}
   ${friendsHtml()}
   <div class="grid">
@@ -847,7 +875,15 @@ app.addEventListener('click', (e) => {
       if (st.practice) {
         backHome();
         render();
-      } else send({ t: 'leave' });
+      } else {
+        send({ t: 'leave' });
+        // Leaving the quick-match queue: go home straight away (the server confirms too).
+        if (st.screen === 'queue') {
+          st.screen = 'home';
+          st.queue = null;
+          render();
+        }
+      }
       break;
     case 'copy': {
       const input = document.getElementById('invite') as HTMLInputElement;
@@ -910,5 +946,6 @@ if (st.verifyCode) {
 else if (st.joinCode && st.name) online().send({ t: 'join', code: st.joinCode });
 if (!st.conn && (store('doughnut-online') === '1' || st.name)) online();
 loadLeaders();
+loadStats();
 window.addEventListener('beforeunload', () => store('doughnut-online', st.table && !st.practice ? '1' : '0'));
 render();
