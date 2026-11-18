@@ -48,8 +48,8 @@ export interface Timing {
 export const DEFAULT_TIMING: Timing = {
   turnMs: 30_000,
   botDelayMs: 700,
-  trickPauseMs: 1_200,
-  betweenHandsMs: 4_000,
+  trickPauseMs: 1_400, // the trick stays, then slides to the winner (client animation ~1.1 s)
+  betweenHandsMs: 6_500, // cards gathered to the next dealer (~2 s), then the results
   disconnectedMs: 1_500,
 };
 

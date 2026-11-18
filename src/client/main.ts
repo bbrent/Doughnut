@@ -5,7 +5,7 @@ import { localConn, onlineConn, type Conn, type Status } from './conn';
 import { BOT_LEVELS, BOT_LEVEL_IDS } from '../game/bots';
 import { robotHtml } from './icons';
 import { serverHttp, serverWs } from './server-url';
-import { chooseLayout, tableSvg } from './table-svg';
+import { HAND_END_MS, animDelay, chooseLayout, tableSvg } from './table-svg';
 
 // ---- errors ------------------------------------------------------------------------
 // Show unexpected errors on the page (not just the console), so players can report them.
@@ -668,10 +668,11 @@ function tableHtml(t: TableView): string {
         : !st.account && !st.practice
           ? '<div class="small muted" style="margin-top:8px">Playing as a guest, so this game wasn\'t saved. Sign up on the home screen to keep your record.</div>'
           : '';
-    overlay = `<div class="overlay"><div class="overlay-card"><h2>${winners} win${t.winners.length === 1 && t.winners[0] !== t.you ? 's' : ''}!</h2>${resultsHtml(t, o)}${ratingLine}</div></div>`;
+    // Results appear once the cards have been gathered (see table-svg.ts).
+    overlay = `<div class="overlay after-gather" style="animation-delay:${animDelay(`${t.code}:${o.handsPlayed}:overlay`, HAND_END_MS)}"><div class="overlay-card"><h2>${winners} win${t.winners.length === 1 && t.winners[0] !== t.you ? 's' : ''}!</h2>${resultsHtml(t, o)}${ratingLine}</div></div>`;
     bottom = `<div class="prompt">${t.seats.some((x) => x.kind === 'bot') ? botLevelLine(t) : ''}<div class="actions">${t.you === t.hostSeat ? '<button class="primary" data-action="start">Play again</button>' : '<span class="muted">The host can start a rematch.</span>'}<button data-action="leave">Leave</button></div></div>`;
   } else if (o.phase === 'handOver') {
-    overlay = `<div class="overlay"><div class="overlay-card"><h2>Hand over</h2>${resultsHtml(t, o)}<div class="small muted" style="margin-top:6px">Next hand starting…</div></div></div>`;
+    overlay = `<div class="overlay after-gather" style="animation-delay:${animDelay(`${t.code}:${o.handsPlayed}:overlay`, HAND_END_MS)}"><div class="overlay-card"><h2>Hand over</h2>${resultsHtml(t, o)}<div class="small muted" style="margin-top:6px">Next hand starting…</div></div></div>`;
     bottom = '';
   }
   return `${header}<div class="table-wrap">${svg}${overlay}</div>${bottom ? `<div class="below">${bottom}</div>` : ''}`;

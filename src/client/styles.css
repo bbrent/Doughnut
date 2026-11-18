@@ -186,3 +186,33 @@ fieldset.choice .hint { display: block; font-size: 12px; color: var(--muted); }
 .stats { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); margin: -8px 0 16px; }
 .live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--line); }
 .live-dot.on { background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 25%, transparent); }
+
+/* Card animations (see table-svg.ts). Translations are in table (viewBox) units. */
+.card-back { fill: #c96f1d; stroke: #fff; stroke-width: 1.5; }
+.card-back-inner { fill: none; stroke: rgba(255, 255, 255, 0.55); stroke-width: 1; }
+.card-back-ring { fill: none; stroke: #ffe3c2; }
+.fly, .gather { transform-box: fill-box; transform-origin: center; animation-fill-mode: both; }
+.fly { animation-name: fly-to-winner; animation-duration: 520ms; animation-timing-function: cubic-bezier(.5, 0, .75, 1); }
+@keyframes fly-to-winner {
+  from { transform: none; opacity: 1; }
+  to { transform: translate(var(--dx), var(--dy)) scale(0.55); opacity: 0; }
+}
+.gather { animation-name: gather; animation-duration: 650ms; animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
+@keyframes gather {
+  from { transform: none; opacity: 1; }
+  85% { opacity: 1; }
+  to { transform: translate(var(--dx), var(--dy)); opacity: 0; }
+}
+/* The final trick's pile only shows once that trick has landed. */
+.gather.appear { animation-name: gather-appear; animation-duration: 1000ms; }
+@keyframes gather-appear {
+  0%, 30% { opacity: 0; transform: none; }
+  35% { opacity: 1; transform: none; }
+  90% { opacity: 1; }
+  to { transform: translate(var(--dx), var(--dy)); opacity: 0; }
+}
+.overlay.after-gather { animation: overlay-in 300ms ease-out both; }
+@keyframes overlay-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .fly, .gather, .overlay.after-gather { animation-duration: 1ms !important; }
+}
