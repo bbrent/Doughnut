@@ -121,6 +121,16 @@ function onMessage(m: ServerMessage) {
     case 'welcome':
       if (st.practice) break;
       loadStats(); // now counting you too
+      // Back from the background or a lost connection: if the game we were
+      // showing no longer exists on the server, don't leave a dead table up.
+      if (st.screen === 'table' && st.table && m.table !== st.table.code) {
+        backHome();
+        toast(m.table ? 'Rejoining your game…' : 'That game is no longer running (the server may have restarted).');
+      } else if (st.screen === 'queue' && !m.queued) {
+        st.screen = 'home';
+        st.queue = null;
+        toast('You were taken out of the quick-match queue while away. Press Quick match to look again.');
+      }
       st.account = m.account;
       st.helloName = m.name;
       if (m.account) setName(m.account.nickname);

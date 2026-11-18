@@ -39,6 +39,7 @@ class MessageBucket {
   }
 }
 
+const STARTED_AT = new Date().toISOString();
 declare const __VERSION__: string;
 const VERSION = typeof __VERSION__ !== 'undefined' ? __VERSION__ : 'dev';
 
@@ -167,6 +168,8 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
           model: net !== null,
           store: store.repo.constructor.name,
           email: store.mailStatus(),
+          // To spot hosts that restart the app or run several copies of it.
+          instance: { pid: process.pid, startedAt: STARTED_AT },
         }),
       );
       return;

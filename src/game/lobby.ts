@@ -162,6 +162,10 @@ export class Lobby {
    */
   async handle(client: Client, token: string | null, msg: ClientMessage): Promise<string | null> {
     try {
+      if (msg.t === 'ping') {
+        client.send({ t: 'pong' });
+        return token;
+      }
       if (msg.t === 'hello') return await this.hello(client, msg.token, msg.name);
       if (!token) throw new TableError('Say hello first');
       const s = this.sessions.get(token)!;
@@ -345,7 +349,13 @@ export class Lobby {
       if (s.table) this.push(s.table);
     }
     s.clients.set(client, token);
-    client.send({ t: 'welcome', name: s.user.name, account: s.account });
+    client.send({
+      t: 'welcome',
+      name: s.user.name,
+      account: s.account,
+      table: s.table?.code ?? null,
+      queued: this.queue.some((q) => q.session === s),
+    });
     if (s.table) {
       s.table.join(s.user); // reconnect to the same seat
       this.push(s.table);

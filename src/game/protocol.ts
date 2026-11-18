@@ -150,10 +150,17 @@ export type ClientMessage =
   | { t: 'settings'; botLevel: BotLevel }
   | { t: 'start' }
   | { t: 'move'; move: Move }
-  | { t: 'leave' };
+  | { t: 'leave' }
+  /** Keep-alive: the server answers pong. Allowed before hello. */
+  | { t: 'ping' };
 
 export type ServerMessage =
-  | { t: 'welcome'; name: string; account: AccountView | null }
+  /**
+   * After hello (including every reconnect): who you are, and where you are on
+   * the server, so a page that was away can drop a game that no longer exists.
+   */
+  | { t: 'welcome'; name: string; account: AccountView | null; table: string | null; queued: boolean }
+  | { t: 'pong' }
   /** Sent after login / email confirmed / password reset / logout. */
   | { t: 'account'; name: string; account: AccountView | null; why: 'login' | 'verified' | 'reset' | 'logout' }
   /** Information for the account forms ("check your email"). */

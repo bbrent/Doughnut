@@ -169,6 +169,29 @@ describe('lobby', () => {
     expect(b.table!.you).toBe(1);
   });
 
+  it('ping works before hello; welcome says where you are after a reconnect', async () => {
+    const { clock, lobby } = setup();
+    const a = new Recorder();
+    await lobby.handle(a, null, { t: 'ping' });
+    expect(a.last('pong')).toBeTruthy();
+    await lobby.handle(a, null, { t: 'hello', token: T1, name: 'Alice' });
+    expect(a.last('welcome')).toMatchObject({ table: null, queued: false });
+    await lobby.handle(a, T1, { t: 'create', settings: { mode: 'doughnut', seats: 2, botLevel: 'easy' } });
+    const code = a.table!.code;
+    lobby.disconnect(a, T1);
+    const back = new Recorder();
+    await lobby.handle(back, null, { t: 'hello', token: T1, name: 'Alice' });
+    expect(back.last('welcome')).toMatchObject({ table: code, queued: false });
+    expect(back.table!.code).toBe(code);
+    await lobby.handle(back, T1, { t: 'leave' });
+    await lobby.handle(back, T1, { t: 'quick', mode: 'doughnut' });
+    lobby.disconnect(back, T1); // the server drops you from the queue while you're away
+    const again = new Recorder();
+    await lobby.handle(again, null, { t: 'hello', token: T1, name: 'Alice' });
+    expect(again.last('welcome')).toMatchObject({ table: null, queued: false });
+    void clock;
+  });
+
   it('reconnecting with the same token returns to the same seat', async () => {
     const { lobby } = setup();
     const a = new Recorder();
