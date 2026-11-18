@@ -209,15 +209,29 @@ function piles(L: Layout, t: TableView, o: WireObservation, except?: number): st
     .join('');
 }
 
+/**
+ * A played card sliding in from its player's seat to its place on the felt.
+ * `trick` is the trick's index in the hand, so each card animates once.
+ */
+function playedCard(L: Layout, t: TableView, o: WireObservation, trick: number, player: number, card: number, highlight = false): string {
+  const a = seatAngle(player, t.you, t.seats.length);
+  const [x, y] = point(L, a, L.seat, L.playRadius);
+  const [sx, sy] = point(L, a, L.seat);
+  const tilt = ((card * 37) % 15) - 7;
+  const key = `${t.code}:${o.handsPlayed}:${trick}:${player}:play`;
+  return `<g class="play-in" style="--fx:${(sx - x).toFixed(1)}px;--fy:${(sy - y).toFixed(1)}px;animation-delay:${animDelay(key, 0)}">${cardSvg(card, x, y, L.card, { rotate: tilt, highlight })}</g>`;
+}
+
 /** The last trick's cards sliding over to the winner's pile. */
 function trickToWinner(L: Layout, t: TableView, o: WireObservation, key: string, holdMs: number): string {
   const last = o.tricks[o.tricks.length - 1];
   const [wx, wy] = pilePos(L, t, last.winner);
+  const trick = o.tricks.length - 1;
   return last.plays
     .map((p) => {
       const [x, y] = point(L, seatAngle(p.player, t.you, t.seats.length), L.seat, L.playRadius);
-      const tilt = ((p.card * 37) % 15) - 7;
-      return flying(cardSvg(p.card, x, y, L.card, { rotate: tilt, highlight: p.player === last.winner }), wx - x, wy - y, key, holdMs);
+      // The card that completed the trick still slides in first (the others already have).
+      return flying(playedCard(L, t, o, trick, p.player, p.card, p.player === last.winner), wx - x, wy - y, key, holdMs);
     })
     .join('');
 }
@@ -227,12 +241,13 @@ function centre(L: Layout, t: TableView, o: WireObservation): string {
   const parts: string[] = [];
   const n = t.seats.length;
   // Turn-up and trump in the middle.
-  const small: [number, number] = [cw * 0.8, ch * 0.8];
-  parts.push(cardSvg(o.turnUp, L.cx, L.cy - 8, small, { faded: o.dealerTookTurnUp }));
+  // The turn-up shows trump all hand, so it's a little bigger than a played card.
+  const small: [number, number] = [cw * 1.2, ch * 1.2];
+  parts.push(cardSvg(o.turnUp, L.cx, L.cy - 12, small, { faded: o.dealerTookTurnUp }));
   const trump = o.trump === null ? '' : SUIT_SYMBOLS[o.trump];
   const red = o.trump === 1 || o.trump === 2;
   parts.push(
-    `<text x="${L.cx}" y="${L.cy + small[1] / 2 + 14}" text-anchor="middle" class="felt-label">${o.dealerTookTurnUp ? 'turn-up taken · ' : ''}trump <tspan class="${red ? 'trump-red' : 'trump-black'}">${trump}</tspan></text>`,
+    `<text x="${L.cx}" y="${L.cy + small[1] / 2 + 8}" text-anchor="middle" class="felt-label">${o.dealerTookTurnUp ? 'turn-up taken · ' : ''}trump <tspan class="${red ? 'trump-red' : 'trump-black'}">${trump}</tspan></text>`,
   );
 
   // Just after a trick: its cards stay a moment, then slide to the winner's pile.
@@ -246,14 +261,10 @@ function centre(L: Layout, t: TableView, o: WireObservation): string {
   if (showingLast) {
     parts.push(trickToWinner(L, t, o, lastKey, 550));
     const who = last.winner === t.you ? 'You take' : `${esc(clip(t.seats[last.winner].name, 16))} takes`;
-    parts.push(`<text x="${L.cx}" y="${L.cy + small[1] / 2 + 36}" text-anchor="middle" class="felt-label strong">${who} the trick</text>`);
+    parts.push(`<text x="${L.cx}" y="${L.cy + small[1] / 2 + 28}" text-anchor="middle" class="felt-label strong">${who} the trick</text>`);
   }
-  for (const p of o.currentTrick) {
-    const a = seatAngle(p.player, t.you, n);
-    const [x, y] = point(L, a, L.seat, L.playRadius);
-    const tilt = ((p.card * 37) % 15) - 7;
-    parts.push(cardSvg(p.card, x, y, L.card, { rotate: tilt }));
-  }
+  for (const p of o.currentTrick) parts.push(playedCard(L, t, o, o.tricks.length, p.player, p.card));
+  void n;
   return parts.join('');
 }
 
