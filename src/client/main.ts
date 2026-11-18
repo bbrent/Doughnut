@@ -401,9 +401,9 @@ function homeHtml(): string {
       <fieldset class="choice">
         <legend class="small muted">If nobody's waiting</legend>
         <label><input type="radio" name="q-pref" value="join" ${quickPref() === 'join' ? 'checked' : ''} />
-          <span>Join a game in progress<span class="hint">Take a bot's seat, or wait 10 s for players</span></span></label>
+          <span>Join a game in progress<span class="hint">Take a bot's seat in a game under way, or wait for players</span></span></label>
         <label><input type="radio" name="q-pref" value="wait" ${quickPref() === 'wait' ? 'checked' : ''} />
-          <span>Wait for players<span class="hint">Up to a minute, then bots fill the empty seats</span></span></label>
+          <span>Wait for players<span class="hint">Once two or more are here, wait up to a minute for more</span></span></label>
       </fieldset>
       <hr style="border:none;border-top:1px solid var(--line)">
       <label>Join a table</label>
@@ -465,19 +465,36 @@ function quickPref(): QuickPreference {
 
 function queueHtml(): string {
   const q = st.queue;
-  const others = q ? q.waiting - 1 : 0;
-  const who = others === 0 ? 'Nobody else is waiting yet.' : `${others} other ${others === 1 ? 'person is' : 'people are'} waiting with you.`;
-  return `
+  const me = q?.players.find((p) => p.you);
+  const others = q ? q.players.filter((p) => !p.you) : [];
+  const joinBtn = q && q.joinable > 0 ? `<button class="primary" data-action="quick-join">Join a game in progress (${q.joinable})</button>` : '';
+  if (!q || others.length === 0) {
+    return `
   <div class="panel stack" style="max-width:460px;margin:40px auto;text-align:center">
-    <h2>Finding players…</h2>
-    <div>${who}</div>
-    ${q ? `<div class="muted">Bots fill the empty seats in <strong data-countdown="${q.botsAt}"></strong> if not enough people arrive.</div>` : ''}
+    <h2>Waiting for another player…</h2>
+    <div>You're the only one looking right now. Quick matches need at least two people, so the game starts as soon as someone else joins.</div>
     <div class="actions" style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
-      ${q && q.joinable > 0 ? `<button class="primary" data-action="quick-join">Join a game in progress (${q.joinable})</button>` : ''}
-      <button data-action="quick-now">Start now with bots</button>
+      ${joinBtn}
+      <button data-action="quick-practice">Practice against bots instead</button>
       <button data-action="leave">Cancel</button>
     </div>
-    ${q && q.joinable > 0 ? '<div class="small muted">Joining a game in progress takes over a bot\'s seat, score and all.</div>' : ''}
+    ${joinBtn ? '<div class="small muted">Joining a game in progress takes over a bot\'s seat, score and all.</div>' : ''}
+  </div>`;
+  }
+  const ready = q.players.filter((p) => p.ready).length;
+  const list = q.players
+    .map((p) => `<li>${esc(p.name)}${p.you ? ' (you)' : ''} ${p.ready ? '<span class="pill on">ready to start</span>' : ''}</li>`)
+    .join('');
+  return `
+  <div class="panel stack" style="max-width:460px;margin:40px auto;text-align:center">
+    <h2>Players found</h2>
+    <ul class="waiting-list">${list}</ul>
+    <div class="muted">Starting in <strong data-countdown="${q.botsAt}"></strong>, with bots in any empty seats,
+      or sooner if everyone chooses to start now (${ready} of ${q.players.length}).</div>
+    <div class="actions" style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+      ${me?.ready ? '<button data-action="quick-unready">Not yet</button>' : '<button class="primary" data-action="quick-ready">Start now with bots</button>'}
+      <button data-action="leave">Cancel</button>
+    </div>
   </div>`;
 }
 
@@ -793,8 +810,15 @@ app.addEventListener('click', (e) => {
       if (needName()) return;
       online().send({ t: 'quick', mode: 'doughnut', botLevel: val('q-level') as BotLevel, prefer: quickPref() });
       break;
-    case 'quick-now':
-      send({ t: 'quickNow' });
+    case 'quick-ready':
+    case 'quick-unready':
+      send({ t: 'quickReady', ready: el.dataset.action === 'quick-ready' });
+      break;
+    case 'quick-practice':
+      // Starting practice closes the online connection, which takes us out of the queue.
+      st.screen = 'home';
+      st.queue = null;
+      void practice({ mode: 'doughnut', seats: 4, botLevel: savedLevel() });
       break;
     case 'quick-join':
       send({ t: 'quickJoin' });

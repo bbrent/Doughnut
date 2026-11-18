@@ -79,7 +79,9 @@ interface FriendCache {
 export interface LobbyOptions {
   /** Quick match: table size, and how long to wait before filling with bots. */
   quickSeats: number;
-  /** How long to wait for players before bots fill in (prefer 'join'). */
+  /** Quick-match games need at least this many people (bots fill the rest). */
+  quickMinHumans: number;
+  /** Once enough people are waiting: how long until bots fill in (prefer 'join'). */
   quickWaitMs: number;
   /** ... and for players who chose to wait for people (prefer 'wait'). */
   quickLongWaitMs: number;
@@ -91,6 +93,7 @@ export interface LobbyOptions {
 
 export const DEFAULT_LOBBY: LobbyOptions = {
   quickSeats: 4,
+  quickMinHumans: 2,
   quickWaitMs: 10_000,
   quickLongWaitMs: 60_000,
   backfillBeforeHand: 3,
@@ -117,7 +120,7 @@ export class Lobby {
   private lastInvite = new Map<string, number>();
   private tables = new Map<string, Table>();
   private members = new Map<Table, Set<Session>>();
-  private queue: { session: Session; mode: string; botLevel: BotLevel; since: number; waitMs: number }[] = [];
+  private queue: { session: Session; mode: string; botLevel: BotLevel; since: number; waitMs: number; ready: boolean }[] = [];
   /** Last queue status sent to each waiting session, to send only changes. */
   private queueSent = new WeakMap<Session, string>();
   private rng: Rng;
@@ -230,9 +233,13 @@ export class Lobby {
           this.requireName(s);
           this.quick(s, msg.mode, isBotLevel(msg.botLevel) ? msg.botLevel : 'medium', msg.prefer === 'wait' ? 'wait' : 'join');
           break;
-        case 'quickNow':
-          this.quickNow(s);
+        case 'quickReady': {
+          const q = this.queue.find((x) => x.session === s);
+          if (!q) throw new TableError("You're not waiting for a quick match");
+          q.ready = !!msg.ready;
+          this.tick();
           break;
+        }
         case 'quickJoin': {
           const q = this.queue.find((x) => x.session === s);
           if (!q) throw new TableError("You're not waiting for a quick match");
@@ -534,7 +541,7 @@ export class Lobby {
     if (prefer === 'join' && this.backfill(s, mode)) return;
     this.queueSent.delete(s); // always send the waiting screen afresh
     const waitMs = prefer === 'wait' ? this.opts.quickLongWaitMs : this.opts.quickWaitMs;
-    if (!this.queue.some((q) => q.session === s)) this.queue.push({ session: s, mode, botLevel, since: this.now(), waitMs });
+    if (!this.queue.some((q) => q.session === s)) this.queue.push({ session: s, mode, botLevel, since: this.now(), waitMs, ready: false });
     this.tick();
     this.presenceChanged(s.user.accountId);
   }
@@ -569,14 +576,6 @@ export class Lobby {
     return true;
   }
 
-  /** Start now with whoever is waiting for the same mode, bots in the rest. */
-  private quickNow(s: Session): void {
-    const q = this.queue.find((x) => x.session === s);
-    if (!q) throw new TableError("You're not waiting for a quick match");
-    const others = this.queue.filter((x) => x.mode === q.mode && x !== q);
-    this.startQuick([q, ...others].slice(0, this.opts.quickSeats));
-  }
-
   private startQuick(group: typeof this.queue): void {
     this.queue = this.queue.filter((q) => !group.includes(q));
     const sessions = group.map((q) => q.session);
@@ -591,19 +590,33 @@ export class Lobby {
   }
 
   /**
-   * Form quick-match tables: a full table as soon as enough people are
-   * waiting, or whoever is waiting plus bots once anyone's wait is up.
-   * Also keeps everyone waiting up to date. Call about once a second.
+   * When the waiting group for a mode starts with bots: once at least
+   * quickMinHumans people are waiting, the shortest wait among them counts
+   * from the moment the group became big enough. null: not enough people yet.
+   */
+  private botsAt(waiting: typeof this.queue): number | null {
+    if (waiting.length < this.opts.quickMinHumans) return null;
+    const enoughSince = waiting[this.opts.quickMinHumans - 1].since;
+    return enoughSince + Math.min(...waiting.map((q) => q.waitMs));
+  }
+
+  /**
+   * Form quick-match tables, at least quickMinHumans people each: at once when
+   * full, when everyone waiting has voted to start now, or when the countdown
+   * ends (bots fill the empty seats). Also keeps everyone waiting up to date.
+   * Call about once a second.
    */
   tick(): void {
     for (const mode of new Set(this.queue.map((q) => q.mode))) {
       for (;;) {
         const waiting = this.queue.filter((q) => q.mode === mode);
-        if (!waiting.length) break;
-        const full = waiting.length >= this.opts.quickSeats;
-        const due = waiting.some((q) => this.now() - q.since >= q.waitMs);
-        if (!full && !due) break;
-        this.startQuick(waiting.slice(0, this.opts.quickSeats));
+        const group = waiting.slice(0, this.opts.quickSeats);
+        if (group.length < this.opts.quickMinHumans) break;
+        const full = group.length >= this.opts.quickSeats;
+        const allReady = group.every((q) => q.ready);
+        const at = this.botsAt(waiting)!;
+        if (!full && !allReady && this.now() < at) break;
+        this.startQuick(group);
       }
     }
     this.sendQueueStatus();
@@ -617,10 +630,11 @@ export class Lobby {
     const byMode = new Map<string, typeof this.queue>();
     for (const q of this.queue) byMode.set(q.mode, [...(byMode.get(q.mode) ?? []), q]);
     for (const [mode, waiting] of byMode) {
-      const botsAt = Math.min(...waiting.map((q) => q.since + q.waitMs));
+      const botsAt = this.botsAt(waiting);
       const joinable = this.backfillTables(mode).length;
       waiting.forEach((q, i) => {
-        const view: QueueView = { position: i + 1, waiting: waiting.length, botsAt, joinable };
+        const players = waiting.map((w) => ({ name: w.session.user.name, ready: w.ready, you: w === q }));
+        const view: QueueView = { position: i + 1, players, botsAt, joinable };
         const key = JSON.stringify(view);
         if (this.queueSent.get(q.session) === key) return;
         this.queueSent.set(q.session, key);

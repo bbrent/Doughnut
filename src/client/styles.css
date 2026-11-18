@@ -182,3 +182,4 @@ fieldset.choice legend { padding: 0 4px; }
 fieldset.choice label { display: flex; gap: 8px; align-items: baseline; margin: 6px 0 0; color: var(--ink); font-size: 14px; }
 fieldset.choice input { width: auto; margin: 0; }
 fieldset.choice .hint { display: block; font-size: 12px; color: var(--muted); }
+.waiting-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; align-items: center; }

@@ -6,10 +6,13 @@ export type QuickPreference = 'join' | 'wait';
 
 export interface QueueView {
   position: number;
-  /** People waiting for this mode, including you. */
-  waiting: number;
-  /** Epoch ms when bots fill the empty seats (if nobody else arrives). */
-  botsAt: number;
+  /** People waiting for this mode, including you, with their votes to start now. */
+  players: { name: string; ready: boolean; you: boolean }[];
+  /**
+   * Epoch ms when the game starts with bots in the empty seats. null while
+   * you're the only one waiting: a quick match needs at least two people.
+   */
+  botsAt: number | null;
   /** Quick-match games under way that you could join, taking a bot's seat. */
   joinable: number;
 }
@@ -136,8 +139,11 @@ export type ClientMessage =
    * waits up to a minute for players. `botLevel` is for seats bots fill.
    */
   | { t: 'quick'; mode: string; botLevel?: BotLevel; prefer?: QuickPreference }
-  /** While waiting: start now, with bots in the empty seats. */
-  | { t: 'quickNow' }
+  /**
+   * While waiting: vote to start now, bots in the empty seats. Starts when
+   * everyone waiting (at least two people) has voted. Send false to take it back.
+   */
+  | { t: 'quickReady'; ready: boolean }
   /** While waiting: take a bot's seat in a game that has just started. */
   | { t: 'quickJoin' }
   /** Host only, before the game starts or before a rematch. */
