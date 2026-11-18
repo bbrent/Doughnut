@@ -10,7 +10,7 @@
 import { randomBytes } from 'node:crypto';
 import { AccountError, cleanNickname, type AccountInfo, type Accounts } from '../game/lobby';
 import type { GameRecord } from '../game/protocol';
-import { linkEmail, type Mailer } from './mailer';
+import { linkEmail, maskEmail, type Email, type Mailer } from './mailer';
 import { LoginThrottle, checkNewPassword, hashPassword, verifyPassword } from './password';
 import { emailKey, profileOf, sha256, type FriendLists, type LeaderRow, type PlayerRow, type Repo } from './store';
 
@@ -65,6 +65,36 @@ export class AccountService implements Accounts {
   init() {
     return this.repo.init();
   }
+
+  /** Email status for /health (no secrets). */
+  mailStatus() {
+    return this.mailer.status();
+  }
+
+  /** Check the mail server login (startup). */
+  checkMail() {
+    return this.mailer.verify();
+  }
+
+  /** At most one email per address per minute (and five an hour); logs when one is skipped. */
+  private allowSend(email: string): boolean {
+    if (this.sends.allow(emailKey(email))) return true;
+    console.log(`Email to ${maskEmail(email)} skipped: one was sent to that address less than a minute ago (or 5 this hour)`);
+    return false;
+  }
+
+  /**
+   * Send, turning a mail-server failure into a message for the player (the
+   * details go to the log and /health). `quiet`: don't tell the player, for
+   * answers that must look the same whether or not an account exists.
+   */
+  private async deliver(email: Email, quiet = false): Promise<void> {
+    try {
+      await this.mailer.send(email);
+    } catch {
+      if (!quiet) throw new AccountError("We couldn't send the email just now. Please try again in a few minutes.");
+    }
+  }
   close() {
     return this.repo.close();
   }
@@ -101,9 +131,9 @@ export class AccountService implements Accounts {
   }
 
   private async sendVerify(p: PlayerRow) {
-    if (!p.email || !this.sends.allow(emailKey(p.email))) return;
+    if (!p.email || !this.allowSend(p.email)) return;
     const link = await this.newLink(p.id, 'verify');
-    await this.mailer.send(
+    await this.deliver(
       linkEmail(
         p.email,
         'Confirm your Doughnut account',
@@ -135,9 +165,9 @@ export class AccountService implements Accounts {
     const existing = await this.repo.byEmail(email);
     if (existing?.verified_at) {
       // Don't reveal that the email has an account; tell its owner instead.
-      if (this.sends.allow(emailKey(email))) {
+      if (this.allowSend(email)) {
         const link = await this.newLink(existing.id, 'reset');
-        await this.mailer.send(
+        await this.deliver(
           linkEmail(
             existing.email!,
             'You already have a Doughnut account',
@@ -203,9 +233,9 @@ export class AccountService implements Accounts {
   async requestPasswordReset(email: string): Promise<void> {
     if (!validEmail(email)) throw new AccountError("That doesn't look like an email address");
     const p = await this.repo.byEmail(email);
-    if (!p || !this.sends.allow(emailKey(email))) return;
+    if (!p || !this.allowSend(email)) return;
     const link = await this.newLink(p.id, 'reset');
-    await this.mailer.send(
+    await this.deliver(
       linkEmail(
         p.email!,
         'Reset your Doughnut password',

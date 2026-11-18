@@ -166,6 +166,7 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
           tables: lobby.tableCount,
           model: net !== null,
           store: store.repo.constructor.name,
+          email: store.mailStatus(),
         }),
       );
       return;
