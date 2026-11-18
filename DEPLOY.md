@@ -170,6 +170,5 @@ First, open `/health` on the app's address. It shows the app version, the Node.j
 | Leaderboard never appears | Same causes as "reconnecting…" |
 | `/health` shows `MemoryRepo` | Wrong database settings, or the user lacks rights. The log shows the MySQL error |
 | No confirmation emails | Open `/health` and look at `"email"`: `"mode":"log"` means SMTP isn't set (emails only go to the log); `"check":"failed"` / `"lastError"` give the mail server's reason with a hint; `"lastSentAt"` means it was sent, so check spam, then SPF and DKIM (cPanel: *Email Deliverability*). The app log has a line for every email sent, failed or skipped (at most one per address per minute). |
-| (old) No confirmation emails | Check the log for SMTP errors. Try port 465 with `SMTP_SECURE=true`. Check spam, SPF and DKIM |
 | Email links point to localhost | `PUBLIC_URL` isn't set |
 | Login warns about HTTPS | The site is on `http://`. Turn on SSL for the domain |
