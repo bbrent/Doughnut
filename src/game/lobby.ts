@@ -9,7 +9,7 @@
  * session when the same account logs in on several devices.
  */
 import { MODES, mulberry32, randInt, type Rng } from '../engine';
-import type { AccountView, BotLevel, ClientMessage, FriendView, FriendsView, GameRecord, Profile, ServerMessage, TableSettings } from './protocol';
+import type { AccountView, BotLevel, ClientMessage, QuickPreference, QueueView, FriendView, FriendsView, GameRecord, Profile, ServerMessage, TableSettings } from './protocol';
 import { isBotLevel } from './bots';
 import { Table, TableError, type TableDeps, type User } from './table';
 
@@ -79,12 +79,23 @@ interface FriendCache {
 export interface LobbyOptions {
   /** Quick match: table size, and how long to wait before filling with bots. */
   quickSeats: number;
+  /** How long to wait for players before bots fill in (prefer 'join'). */
   quickWaitMs: number;
+  /** ... and for players who chose to wait for people (prefer 'wait'). */
+  quickLongWaitMs: number;
+  /** People from the queue may take a bot's seat in a quick-match game before this many hands are done. */
+  backfillBeforeHand: number;
   /** Tables with no connected humans are removed after this long. */
   idleTableMs: number;
 }
 
-export const DEFAULT_LOBBY: LobbyOptions = { quickSeats: 4, quickWaitMs: 10_000, idleTableMs: 10 * 60_000 };
+export const DEFAULT_LOBBY: LobbyOptions = {
+  quickSeats: 4,
+  quickWaitMs: 10_000,
+  quickLongWaitMs: 60_000,
+  backfillBeforeHand: 3,
+  idleTableMs: 10 * 60_000,
+};
 
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 
@@ -106,7 +117,9 @@ export class Lobby {
   private lastInvite = new Map<string, number>();
   private tables = new Map<string, Table>();
   private members = new Map<Table, Set<Session>>();
-  private queue: { session: Session; mode: string; botLevel: BotLevel; since: number }[] = [];
+  private queue: { session: Session; mode: string; botLevel: BotLevel; since: number; waitMs: number }[] = [];
+  /** Last queue status sent to each waiting session, to send only changes. */
+  private queueSent = new WeakMap<Session, string>();
   private rng: Rng;
   private guests = 0;
   readonly opts: LobbyOptions;
@@ -215,8 +228,17 @@ export class Lobby {
           break;
         case 'quick':
           this.requireName(s);
-          this.enqueue(s, msg.mode, isBotLevel(msg.botLevel) ? msg.botLevel : 'medium');
+          this.quick(s, msg.mode, isBotLevel(msg.botLevel) ? msg.botLevel : 'medium', msg.prefer === 'wait' ? 'wait' : 'join');
           break;
+        case 'quickNow':
+          this.quickNow(s);
+          break;
+        case 'quickJoin': {
+          const q = this.queue.find((x) => x.session === s);
+          if (!q) throw new TableError("You're not waiting for a quick match");
+          if (!this.backfill(s, q.mode)) throw new TableError('No game to join right now. Keep waiting, or start now with bots.');
+          break;
+        }
         case 'settings':
           this.requireTable(s).setBotLevel(s.user.id, msg.botLevel);
           break;
@@ -506,20 +528,72 @@ export class Lobby {
 
   // ---- quick match -------------------------------------------------------
 
-  private enqueue(s: Session, mode: string, botLevel: BotLevel): void {
+  private quick(s: Session, mode: string, botLevel: BotLevel, prefer: QuickPreference): void {
     if (!MODES[mode]) throw new TableError(`Unknown mode ${mode}`);
     this.leave(s, true);
-    if (!this.queue.some((q) => q.session === s)) this.queue.push({ session: s, mode, botLevel, since: this.now() });
+    if (prefer === 'join' && this.backfill(s, mode)) return;
+    this.queueSent.delete(s); // always send the waiting screen afresh
+    const waitMs = prefer === 'wait' ? this.opts.quickLongWaitMs : this.opts.quickWaitMs;
+    if (!this.queue.some((q) => q.session === s)) this.queue.push({ session: s, mode, botLevel, since: this.now(), waitMs });
     this.tick();
-    const pos = this.queue.findIndex((q) => q.session === s);
-    if (pos >= 0) this.send(s, { t: 'queued', position: pos + 1 });
     this.presenceChanged(s.user.accountId);
+  }
+
+  /** Quick-match games under way where someone could take a bot's seat. Best first. */
+  private backfillTables(mode: string): Table[] {
+    return [...this.tables.values()]
+      .filter(
+        (t) =>
+          t.quick &&
+          t.settings.mode === mode &&
+          t.status === 'playing' &&
+          t.joinable() &&
+          (t.state?.handsPlayed ?? 0) < this.opts.backfillBeforeHand,
+      )
+      .sort((a, b) => b.humanCount() - a.humanCount() || (a.state?.handsPlayed ?? 0) - (b.state?.handsPlayed ?? 0));
+  }
+
+  /** Put a quick-match player in a bot's seat in a game under way. */
+  private backfill(s: Session, mode: string): boolean {
+    const t = this.backfillTables(mode)[0];
+    if (!t) return false;
+    this.queue = this.queue.filter((q) => q.session !== s);
+    const others = [...(this.members.get(t) ?? [])];
+    t.join(s.user);
+    this.seat(s, t);
+    this.push(t);
+    const hand = (t.state?.handsPlayed ?? 0) + 1;
+    this.send(s, { t: 'joinedInProgress', hand });
+    for (const o of others) this.send(o, { t: 'toast', message: `${s.user.name} joined, taking over a bot's seat` });
+    this.presenceChanged(s.user.accountId);
+    return true;
+  }
+
+  /** Start now with whoever is waiting for the same mode, bots in the rest. */
+  private quickNow(s: Session): void {
+    const q = this.queue.find((x) => x.session === s);
+    if (!q) throw new TableError("You're not waiting for a quick match");
+    const others = this.queue.filter((x) => x.mode === q.mode && x !== q);
+    this.startQuick([q, ...others].slice(0, this.opts.quickSeats));
+  }
+
+  private startQuick(group: typeof this.queue): void {
+    this.queue = this.queue.filter((q) => !group.includes(q));
+    const sessions = group.map((q) => q.session);
+    // Bots (if any are needed) play at the level chosen by whoever waited longest.
+    const t = this.makeTable(sessions[0].user, { mode: group[0].mode, seats: this.opts.quickSeats, botLevel: group[0].botLevel });
+    t.quick = true;
+    for (const s of sessions) {
+      if (s !== sessions[0]) t.join(s.user);
+      this.seat(s, t);
+    }
+    t.start(sessions[0].user.id);
   }
 
   /**
    * Form quick-match tables: a full table as soon as enough people are
-   * waiting, or whoever is waiting plus bots once the oldest has waited long enough.
-   * Call periodically.
+   * waiting, or whoever is waiting plus bots once anyone's wait is up.
+   * Also keeps everyone waiting up to date. Call about once a second.
    */
   tick(): void {
     for (const mode of new Set(this.queue.map((q) => q.mode))) {
@@ -527,23 +601,31 @@ export class Lobby {
         const waiting = this.queue.filter((q) => q.mode === mode);
         if (!waiting.length) break;
         const full = waiting.length >= this.opts.quickSeats;
-        const stale = this.now() - waiting[0].since >= this.opts.quickWaitMs;
-        if (!full && !stale) break;
-        const group = waiting.slice(0, this.opts.quickSeats);
-        this.queue = this.queue.filter((q) => !group.includes(q));
-        const sessions = group.map((q) => q.session);
-        // Bots (if any are needed) play at the level chosen by whoever waited longest.
-        const t = this.makeTable(sessions[0].user, { mode, seats: this.opts.quickSeats, botLevel: group[0].botLevel });
-        for (const s of sessions) {
-          if (s !== sessions[0]) t.join(s.user);
-          this.seat(s, t);
-        }
-        t.start(sessions[0].user.id);
+        const due = waiting.some((q) => this.now() - q.since >= q.waitMs);
+        if (!full && !due) break;
+        this.startQuick(waiting.slice(0, this.opts.quickSeats));
       }
     }
+    this.sendQueueStatus();
     // Clean up abandoned tables.
     for (const t of [...this.tables.values()]) {
       if (!t.hasConnectedHumans() && t.idleMs() > this.opts.idleTableMs) this.removeTable(t);
+    }
+  }
+
+  private sendQueueStatus(): void {
+    const byMode = new Map<string, typeof this.queue>();
+    for (const q of this.queue) byMode.set(q.mode, [...(byMode.get(q.mode) ?? []), q]);
+    for (const [mode, waiting] of byMode) {
+      const botsAt = Math.min(...waiting.map((q) => q.since + q.waitMs));
+      const joinable = this.backfillTables(mode).length;
+      waiting.forEach((q, i) => {
+        const view: QueueView = { position: i + 1, waiting: waiting.length, botsAt, joinable };
+        const key = JSON.stringify(view);
+        if (this.queueSent.get(q.session) === key) return;
+        this.queueSent.set(q.session, key);
+        this.send(q.session, { t: 'queued', queue: view });
+      });
     }
   }
 

@@ -91,6 +91,8 @@ export class Table {
   private readonly rng: Rng;
   private lastActivity: number;
   private startedAt = 0;
+  /** A quick-match table: people from the queue may take over its bots' seats early in the game. */
+  quick = false;
   /** Who started in each seat (null = bot), for the game record. */
   private originalUsers: (User | null)[] = [];
 

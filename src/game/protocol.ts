@@ -2,6 +2,17 @@
 import type { HandResult, Move, Observation } from '../engine';
 
 export type BotLevel = 'beginner' | 'easy' | 'medium' | 'hard';
+export type QuickPreference = 'join' | 'wait';
+
+export interface QueueView {
+  position: number;
+  /** People waiting for this mode, including you. */
+  waiting: number;
+  /** Epoch ms when bots fill the empty seats (if nobody else arrives). */
+  botsAt: number;
+  /** Quick-match games under way that you could join, taking a bot's seat. */
+  joinable: number;
+}
 
 export interface TableSettings {
   mode: string;
@@ -119,8 +130,16 @@ export type ClientMessage =
   | { t: 'inviteDecline'; from: string }
   | { t: 'create'; settings: TableSettings }
   | { t: 'join'; code: string }
-  /** Quick match; `botLevel` is used for any seats bots have to fill. */
-  | { t: 'quick'; mode: string; botLevel?: BotLevel }
+  /**
+   * Quick match. `prefer`: 'join' takes a bot's seat in a quick-match game that
+   * has just started, if there is one (else waits ~10 s for players); 'wait'
+   * waits up to a minute for players. `botLevel` is for seats bots fill.
+   */
+  | { t: 'quick'; mode: string; botLevel?: BotLevel; prefer?: QuickPreference }
+  /** While waiting: start now, with bots in the empty seats. */
+  | { t: 'quickNow' }
+  /** While waiting: take a bot's seat in a game that has just started. */
+  | { t: 'quickJoin' }
   /** Host only, before the game starts or before a rematch. */
   | { t: 'settings'; botLevel: BotLevel }
   | { t: 'start' }
@@ -142,7 +161,9 @@ export type ServerMessage =
   | { t: 'profile'; profile: Profile; ratingChange: number | null }
   | { t: 'table'; table: TableView }
   | { t: 'left' }
-  | { t: 'queued'; position: number }
+  | { t: 'queued'; queue: QueueView }
+  /** You took over a bot's seat in a game already under way. */
+  | { t: 'joinedInProgress'; hand: number }
   | { t: 'error'; message: string };
 
 export function toWire(o: Observation): WireObservation {

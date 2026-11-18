@@ -1,6 +1,6 @@
 /** Web client: home, quick-match queue, lobby and game table. */
 import { MODES, RANKS, SUIT_SYMBOLS, rankOf, suitOf, type Card, type Move } from '../engine';
-import type { AccountView, BotLevel, ClientMessage, FriendView, FriendsView, Invite, ServerMessage, TableSettings, TableView, WireObservation } from '../game/protocol';
+import type { AccountView, BotLevel, QueueView, QuickPreference, ClientMessage, FriendView, FriendsView, Invite, ServerMessage, TableSettings, TableView, WireObservation } from '../game/protocol';
 import { localConn, onlineConn, type Conn, type Status } from './conn';
 import { BOT_LEVELS, BOT_LEVEL_IDS } from '../game/bots';
 import { robotHtml } from './icons';
@@ -48,7 +48,7 @@ const st = {
   practice: false,
   status: 'offline' as Status,
   table: null as TableView | null,
-  queuePos: 0,
+  queue: null as QueueView | null,
   joinCode: new URLSearchParams(location.search).get('t')?.toUpperCase() ?? '',
   /** From links in emails: ?verify=CODE (confirm sign-up), ?reset=CODE (new password). */
   verifyCode: new URLSearchParams(location.search).get('verify'),
@@ -145,9 +145,15 @@ function onMessage(m: ServerMessage) {
       // Practice tables start straight away.
       if (st.practice && m.table.status === 'lobby') st.conn?.send({ t: 'start' });
       break;
+    case 'joinedInProgress':
+      toast(
+        `You took over a bot's seat in a game already under way (hand ${m.hand}).` +
+          (st.account ? " This game won't count toward your rating." : ''),
+      );
+      break;
     case 'queued':
       st.screen = 'queue';
-      st.queuePos = m.position;
+      st.queue = m.queue;
       break;
     case 'left':
       backHome();
@@ -392,7 +398,13 @@ function homeHtml(): string {
         <button class="primary" data-action="quick" style="flex:0 0 auto">Quick match</button>
         ${levelSelect('q-level')}
       </div>
-      <div class="small muted">Plays with whoever is waiting; bots at your chosen level fill empty seats after 10 seconds.</div>
+      <fieldset class="choice">
+        <legend class="small muted">If nobody's waiting</legend>
+        <label><input type="radio" name="q-pref" value="join" ${quickPref() === 'join' ? 'checked' : ''} />
+          <span>Join a game in progress<span class="hint">Take a bot's seat, or wait 10 s for players</span></span></label>
+        <label><input type="radio" name="q-pref" value="wait" ${quickPref() === 'wait' ? 'checked' : ''} />
+          <span>Wait for players<span class="hint">Up to a minute, then bots fill the empty seats</span></span></label>
+      </fieldset>
       <hr style="border:none;border-top:1px solid var(--line)">
       <label>Join a table</label>
       <div class="row">
@@ -446,12 +458,26 @@ function leadersHtml(): string {
   return `<div class="panel" style="margin-top:16px"><h2>Leaderboard</h2>${rows}</div>`;
 }
 
+/** Quick match: what to do when nobody's waiting (remembered). */
+function quickPref(): QuickPreference {
+  return store('doughnut-quick') === 'wait' ? 'wait' : 'join';
+}
+
 function queueHtml(): string {
+  const q = st.queue;
+  const others = q ? q.waiting - 1 : 0;
+  const who = others === 0 ? 'Nobody else is waiting yet.' : `${others} other ${others === 1 ? 'person is' : 'people are'} waiting with you.`;
   return `
-  <div class="panel stack" style="max-width:420px;margin:40px auto;text-align:center">
+  <div class="panel stack" style="max-width:460px;margin:40px auto;text-align:center">
     <h2>Finding players…</h2>
-    <div class="muted">You're number ${st.queuePos} in the queue. Bots join if nobody shows up within 10 seconds.</div>
-    <button data-action="leave">Cancel</button>
+    <div>${who}</div>
+    ${q ? `<div class="muted">Bots fill the empty seats in <strong data-countdown="${q.botsAt}"></strong> if not enough people arrive.</div>` : ''}
+    <div class="actions" style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+      ${q && q.joinable > 0 ? `<button class="primary" data-action="quick-join">Join a game in progress (${q.joinable})</button>` : ''}
+      <button data-action="quick-now">Start now with bots</button>
+      <button data-action="leave">Cancel</button>
+    </div>
+    ${q && q.joinable > 0 ? '<div class="small muted">Joining a game in progress takes over a bot\'s seat, score and all.</div>' : ''}
   </div>`;
 }
 
@@ -618,6 +644,10 @@ function tickCountdown() {
     render();
     return;
   }
+  for (const el of document.querySelectorAll<HTMLElement>('[data-countdown]')) {
+    const s = Math.max(0, Math.ceil((Number(el.dataset.countdown) - Date.now()) / 1000));
+    el.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }
   for (const el of document.querySelectorAll<HTMLElement>('[data-deadline]')) {
     const s = Math.max(0, Math.ceil((Number(el.dataset.deadline) - Date.now()) / 1000));
     el.textContent = s <= 15 ? `${s}s` : '';
@@ -761,7 +791,13 @@ app.addEventListener('click', (e) => {
       return;
     case 'quick':
       if (needName()) return;
-      online().send({ t: 'quick', mode: 'doughnut', botLevel: val('q-level') as BotLevel });
+      online().send({ t: 'quick', mode: 'doughnut', botLevel: val('q-level') as BotLevel, prefer: quickPref() });
+      break;
+    case 'quick-now':
+      send({ t: 'quickNow' });
+      break;
+    case 'quick-join':
+      send({ t: 'quickJoin' });
       break;
     case 'join': {
       if (needName()) return;
@@ -820,6 +856,7 @@ app.addEventListener('click', (e) => {
 
 app.addEventListener('change', (e) => {
   const t = e.target as HTMLSelectElement;
+  if (t.name === 'q-pref') store('doughnut-quick', t.value);
   if (t.id === 'table-level') {
     store('doughnut-level', t.value);
     send({ t: 'settings', botLevel: t.value as BotLevel });

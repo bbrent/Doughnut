@@ -176,3 +176,9 @@ details summary { cursor: pointer; }
 @keyframes boot-show { to { visibility: visible; } }
 #fatal { position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 50; background: #7a1f1f; color: #fff; padding: 12px 14px; border-radius: 10px; font-size: 14px; box-shadow: var(--shadow); }
 #fatal code { white-space: pre-wrap; word-break: break-word; }
+
+fieldset.choice { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px 8px; margin: 0; }
+fieldset.choice legend { padding: 0 4px; }
+fieldset.choice label { display: flex; gap: 8px; align-items: baseline; margin: 6px 0 0; color: var(--ink); font-size: 14px; }
+fieldset.choice input { width: auto; margin: 0; }
+fieldset.choice .hint { display: block; font-size: 12px; color: var(--muted); }

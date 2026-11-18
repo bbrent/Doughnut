@@ -187,7 +187,7 @@ describe('lobby', () => {
     const a = new Recorder();
     await lobby.handle(a, null, { t: 'hello', token: T1, name: 'Alice' });
     await lobby.handle(a, T1, { t: 'quick', mode: 'doughnut' });
-    expect(a.last('queued')!.position).toBe(1);
+    expect(a.last('queued')!.queue).toMatchObject({ position: 1, waiting: 1, joinable: 0 });
     clock.advance(5_000);
     lobby.tick();
     expect(a.table!.status).toBe('playing');
@@ -197,7 +197,7 @@ describe('lobby', () => {
     for (const [i, r] of rs.entries()) {
       const tok = `tokenQ${i}QQQQQQQQQQQQQQQ`;
       await lobby.handle(r, null, { t: 'hello', token: tok, name: `P${i}` });
-      await lobby.handle(r, tok, { t: 'quick', mode: 'doughnut' });
+      await lobby.handle(r, tok, { t: 'quick', mode: 'doughnut', prefer: 'wait' });
     }
     for (const r of rs) expect(r.table!.seats.filter((s) => s.kind === 'human')).toHaveLength(3);
   });
@@ -299,5 +299,98 @@ describe('bot levels', () => {
     lobby.tick();
     expect(r.table!.settings.botLevel).toBe('beginner');
     expect(made.every((l) => l === 'beginner')).toBe(true);
+  });
+});
+
+describe('quick match: joining games in progress and waiting for players', () => {
+  const tok = (i: number) => `tokenQM${i}QQQQQQQQQQQQQQQ`;
+  async function player(lobby: Lobby, i: number, name: string) {
+    const r = new Recorder();
+    await lobby.handle(r, null, { t: 'hello', token: tok(i), name });
+    return r;
+  }
+  function setup() {
+    const clock = new FakeClock();
+    const lobby = new Lobby(
+      { makeBot: () => heuristicAgent(), clock, rng: mulberry32(4), timing: { turnMs: 1_000, botDelayMs: 10, trickPauseMs: 0, betweenHandsMs: 10, disconnectedMs: 10 } },
+      { quickSeats: 4, quickWaitMs: 10_000, quickLongWaitMs: 60_000, backfillBeforeHand: 3 },
+    );
+    return { clock, lobby };
+  }
+
+  it("'join' takes a bot's seat in a quick game that just started; the table is told", async () => {
+    const { clock, lobby } = setup();
+    const a = await player(lobby, 1, 'Ann');
+    await lobby.handle(a, tok(1), { t: 'quick', mode: 'doughnut', prefer: 'join' });
+    clock.advance(10_000);
+    lobby.tick();
+    expect(a.table!.seats.filter((x) => x.kind === 'bot')).toHaveLength(3);
+
+    const b = await player(lobby, 2, 'Ben');
+    await lobby.handle(b, tok(2), { t: 'quick', mode: 'doughnut', prefer: 'join' });
+    expect(b.last('joinedInProgress')).toBeTruthy();
+    expect(b.table!.code).toBe(a.table!.code);
+    expect(b.table!.status).toBe('playing');
+    expect(a.last('toast')!.message).toBe("Ben joined, taking over a bot's seat");
+    expect(a.table!.seats.filter((x) => x.kind === 'human')).toHaveLength(2);
+  });
+
+  it('only quick-match games, and only in their first hands', async () => {
+    const { clock, lobby } = setup();
+    // A private table with bots is never offered.
+    const host = await player(lobby, 1, 'Host');
+    await lobby.handle(host, tok(1), { t: 'create', settings: { mode: 'doughnut', seats: 4, botLevel: 'easy' } });
+    await lobby.handle(host, tok(1), { t: 'start' });
+    const c = await player(lobby, 2, 'Cy');
+    await lobby.handle(c, tok(2), { t: 'quick', mode: 'doughnut', prefer: 'join' });
+    expect(c.last('joinedInProgress')).toBeUndefined();
+    expect(c.last('queued')!.queue.joinable).toBe(0);
+    clock.advance(10_000);
+    lobby.tick();
+    const quickCode = c.table!.code;
+    expect(quickCode).not.toBe(host.table!.code);
+
+    // After 3 hands of Cy's quick game, newcomers wait instead of joining it.
+    while ((c.table!.obs?.handsPlayed ?? 0) < 3 && c.table!.status === 'playing') clock.advance(500);
+    const d = await player(lobby, 3, 'Di');
+    await lobby.handle(d, tok(3), { t: 'quick', mode: 'doughnut', prefer: 'join' });
+    expect(d.last('joinedInProgress')).toBeUndefined();
+    expect(d.last('queued')).toBeTruthy();
+  });
+
+  it("'wait' holds for a minute; someone with a shorter wait arriving brings it forward", async () => {
+    const { clock, lobby } = setup();
+    const a = await player(lobby, 1, 'Al');
+    await lobby.handle(a, tok(1), { t: 'quick', mode: 'doughnut', prefer: 'wait' });
+    expect(a.last('queued')!.queue.botsAt).toBe(clock.now() + 60_000);
+    clock.advance(30_000);
+    lobby.tick();
+    expect(a.table).toBeUndefined();
+
+    const b = await player(lobby, 2, 'Bo');
+    await lobby.handle(b, tok(2), { t: 'quick', mode: 'doughnut', prefer: 'join' }); // nothing to join: waits 10 s
+    expect(a.last('queued')!.queue.waiting).toBe(2);
+    clock.advance(10_000);
+    lobby.tick();
+    expect(a.table!.code).toBe(b.table!.code);
+    expect(a.table!.seats.filter((x) => x.kind === 'human')).toHaveLength(2);
+  });
+
+  it('while waiting: start now with bots, or join a game in progress', async () => {
+    const { clock, lobby } = setup();
+    const a = await player(lobby, 1, 'Ari');
+    await lobby.handle(a, tok(1), { t: 'quick', mode: 'doughnut', prefer: 'wait' });
+    await lobby.handle(a, tok(1), { t: 'quickNow' });
+    expect(a.table!.status).toBe('playing');
+
+    const b = await player(lobby, 2, 'Bea');
+    await lobby.handle(b, tok(2), { t: 'quick', mode: 'doughnut', prefer: 'wait' });
+    clock.advance(1_000);
+    lobby.tick();
+    expect(b.last('queued')!.queue.joinable).toBe(1);
+    await lobby.handle(b, tok(2), { t: 'quickJoin' });
+    expect(b.table!.code).toBe(a.table!.code);
+    await lobby.handle(b, tok(2), { t: 'quickJoin' });
+    expect(b.last('error')!.message).toMatch(/not waiting/);
   });
 });
