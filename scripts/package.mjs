@@ -23,7 +23,7 @@ rmSync('release', { recursive: true, force: true });
 const pub = `${out}/public_html`;
 if (serverUrl) {
 cpSync('dist/public', pub, { recursive: true });
-rmSync(`${pub}/app.js.map`, { force: true });
+rmSync(`${pub}/doughnut-client.js.map`, { force: true });
 const html = readFileSync(`${pub}/index.html`, 'utf8').replace(
   '<meta name="doughnut-server" content="" />',
   `<meta name="doughnut-server" content="${serverUrl}" />`,
@@ -39,11 +39,11 @@ writeFileSync(
   Header always set Referrer-Policy "no-referrer"
   Header always set X-Frame-Options "DENY"
   Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ${connect}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
-  # index.html must never be cached; it links app.js and styles.css with ?v=<hash>, so those can be.
+  # index.html must never be cached; it links doughnut-client.js and styles.css with ?v=<hash>, so those can be.
   <FilesMatch "\\.html$">
     Header set Cache-Control "no-cache"
   </FilesMatch>
-  <FilesMatch "^(app\\.js|styles\\.css)$">
+  <FilesMatch "^(doughnut-client\\.js|styles\\.css)$">
     Header set Cache-Control "public, max-age=31536000, immutable"
   </FilesMatch>
   <FilesMatch "\\.json$">
@@ -73,7 +73,36 @@ if (v[0] < 18 || (v[0] === 18 && v[1] < 17)) {
   console.error(msg);
   throw new Error(msg);
 }
+var fs = require('fs');
+var path = require('path');
+if (!fs.existsSync(path.join(__dirname, 'dist', 'server.cjs'))) {
+  var m = 'Doughnut: dist/server.cjs not found next to app.js (in ' + __dirname + '). ' +
+    'This folder should contain app.js, package.json, dist/ and models/ from the app/ folder of the release.';
+  console.error(m);
+  throw new Error(m);
+}
 require('./dist/server.cjs');
+`,
+);
+writeFileSync(
+  `${app}/README.txt`,
+  `DOUGHNUT GAME SERVER
+
+Everything in this folder goes into your Node app's "Application root", as is:
+
+  app.js          <- the startup file (set "Application startup file" to app.js)
+  package.json
+  dist/           <- keep this folder whole: server.cjs + public/ (the web pages)
+  models/
+  .env            <- your settings (copy .env.example to .env and fill it in),
+                     or enter them as environment variables in your host's panel
+
+Do not move files out of dist/. In particular dist/public/doughnut-client.js is
+the game's browser script; it is not the server.
+
+There is nothing to install: do not run "npm install".
+After uploading, restart the app and open <your address>/health to check it.
+Full instructions: DEPLOY.md
 `,
 );
 writeFileSync(

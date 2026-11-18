@@ -55,7 +55,7 @@ const TYPES: Record<string, string> = {
 export interface ServerOptions {
   /** A port number, or a socket path (some hosts pass one in PORT). */
   port: number | string;
-  /** Directory with index.html, app.js, styles. */
+  /** Directory with index.html, doughnut-client.js, styles. */
   publicDir: string;
   /** Path to the trained model (optional; bots fall back to the heuristic). */
   modelPath?: string;
@@ -217,7 +217,7 @@ export function startServer(opts: ServerOptions): { server: Server; lobby: Lobby
       sendIndex(req, res, pathname);
       return;
     }
-    // app.js and styles.css are linked with ?v=<build hash>, so they can be cached for good.
+    // doughnut-client.js and styles.css are linked with ?v=<build hash>, so they can be cached for good.
     const versioned = url.searchParams.has('v');
     res.writeHead(200, {
       'content-type': TYPES[extname(file)] ?? 'application/octet-stream',

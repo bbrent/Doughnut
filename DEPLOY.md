@@ -30,7 +30,7 @@ This creates `release/doughnut-<version>.zip`, which contains:
 ```
 public_html/      only with --server-url (setup A): the game's pages, for your public folder
   index.html        contains the game server address (<meta name="doughnut-server">)
-  app.js, styles.css, models/
+  doughnut-client.js, styles.css, models/
   .htaccess         security and caching headers for Apache
 app/              the Node app (game server); it can also serve the pages (setup B)
   app.js            start file

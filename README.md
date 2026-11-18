@@ -43,7 +43,7 @@ The server also:
 - sends security headers (CSP, nosniff, no framing)
 - refuses anything but GET/HEAD
 - limits each connection to bursts of 40 messages, then 10 per second
-- links `app.js` and `styles.css` with a content hash, so browsers pick up a new version as soon as it's deployed
+- links `doughnut-client.js` and `styles.css` with a content hash, so browsers pick up a new version as soon as it's deployed
 
 `/health` reports the version, e.g. `0.1.0+<commit>`.
 
